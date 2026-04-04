@@ -1,0 +1,17 @@
+# Normalize line endings for text files
+* text=auto
+
+# Ensure Rust source files are treated as text
+*.rs text
+Cargo.toml text
+README.md text
+
+# Do not diff generated files
+/target/** -diff
+
+# Declare binary files
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.lib binary

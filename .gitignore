@@ -1,0 +1,18 @@
+# Generated files
+/target/
+**/*.rs.bk
+
+# IntelliJ / VS Code
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+**/*.rmeta
+**/*.rlib
+**/*.d
+
+inventory.md

@@ -79,7 +79,7 @@ pub struct SweepNamePatternConfig {
 
 impl BenchSummaryConfig {
     pub fn for_root(
-        root: PathBuf,
+        root: &Path,
         product_name: impl Into<String>,
         report_title: impl Into<String>,
     ) -> Result<Self> {
@@ -203,7 +203,11 @@ fn default_adapters(root: &Path) -> AdapterConfigs {
         }),
         stress: Some(StressAdapterConfig {
             input_root: root.join("target").join("stress"),
-            csv_output: Some(root.join("target").join("stress").join("stress_summary.csv")),
+            csv_output: Some(
+                root.join("target")
+                    .join("stress")
+                    .join("stress_summary.csv"),
+            ),
             min_reasonable_duration_ns: 3e9,
             max_reasonable_throughput_ops_per_s: 1e9,
             authoritative_min_samples: 5,
@@ -282,14 +286,8 @@ fn default_sweep_config() -> Result<SweepConfig> {
                 "payload_size",
                 r"(?P<prefix>payload|message|msg)_(?P<value>\d+[a-zA-Z]*)",
             )?,
-            sweep_pattern(
-                "route_depth",
-                r"(?P<prefix>depth)_(?P<value>\d+[a-zA-Z]*)",
-            )?,
-            sweep_pattern(
-                "fanout_size",
-                r"(?P<prefix>fanout)_(?P<value>\d+[a-zA-Z]*)",
-            )?,
+            sweep_pattern("route_depth", r"(?P<prefix>depth)_(?P<value>\d+[a-zA-Z]*)")?,
+            sweep_pattern("fanout_size", r"(?P<prefix>fanout)_(?P<value>\d+[a-zA-Z]*)")?,
             sweep_pattern(
                 "batch_size",
                 r"(?P<prefix>batch|batch_size)_(?P<value>\d+[a-zA-Z]*)",

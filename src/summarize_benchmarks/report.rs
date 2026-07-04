@@ -8,7 +8,9 @@ use csv::Writer;
 
 use super::compare::ComparisonOutcome;
 use super::config::BenchSummaryConfig;
-use super::model::{BenchmarkManifest, BenchmarkRecord, MetricDirection, SweepGroup};
+use super::model::{
+    BenchmarkDelta, BenchmarkManifest, BenchmarkRecord, MetricDirection, SweepGroup,
+};
 
 pub fn write_adapter_csv(path: &Path, records: &[BenchmarkRecord]) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -245,19 +247,38 @@ fn write_delta_section(
         return;
     }
 
-    let lookup = manifest
-        .records
+    let lookup = record_lookup(&manifest.records);
+    let grouped = group_deltas_by_adapter(&comparison.deltas, &lookup);
+    write_delta_groups(content, &lookup, grouped);
+    write_record_change_section(content, "New Records", &comparison.new_records);
+    write_record_change_section(content, "Missing Records", &comparison.missing_records);
+}
+
+type RecordLookup<'a> = BTreeMap<&'a str, &'a BenchmarkRecord>;
+type GroupedDeltas<'a> = BTreeMap<String, Vec<&'a BenchmarkDelta>>;
+
+fn record_lookup(records: &[BenchmarkRecord]) -> RecordLookup<'_> {
+    records
         .iter()
         .map(|record| (record.id.as_str(), record))
-        .collect::<BTreeMap<_, _>>();
-    let mut grouped = BTreeMap::<String, Vec<_>>::new();
-    for delta in &comparison.deltas {
+        .collect()
+}
+
+fn group_deltas_by_adapter<'a>(
+    deltas: &'a [BenchmarkDelta],
+    lookup: &RecordLookup<'_>,
+) -> GroupedDeltas<'a> {
+    let mut grouped = GroupedDeltas::new();
+    for delta in deltas {
         let adapter = lookup
             .get(delta.id.as_str())
             .map_or_else(|| "unknown".to_string(), |record| record.adapter.clone());
         grouped.entry(adapter).or_default().push(delta);
     }
+    grouped
+}
 
+fn write_delta_groups(content: &mut String, lookup: &RecordLookup<'_>, grouped: GroupedDeltas<'_>) {
     for (adapter, deltas) in grouped {
         let _ = writeln!(content, "### {adapter}");
         let _ = writeln!(content);
@@ -281,92 +302,72 @@ fn write_delta_section(
                 .iter()
                 .map(|delta| {
                     let record = lookup.get(delta.id.as_str()).copied();
-                    let unit = record.map_or("value", |value| value.unit.as_str());
-                    vec![
-                        delta.suite.clone(),
-                        delta.case.clone(),
-                        record
-                            .and_then(|value| value.scenario.clone())
-                            .unwrap_or_else(|| "NA".to_string()),
-                        delta.metric.clone(),
-                        delta.baseline_value.map_or_else(
-                            || "NA".to_string(),
-                            |value| format_measurement(value, unit),
-                        ),
-                        format_measurement(delta.current_value, unit),
-                        format_delta(delta.delta_pct),
-                        format_delta(delta.directional_delta_pct),
-                        delta
-                            .baseline_stability
-                            .clone()
-                            .unwrap_or_else(|| "NA".to_string()),
-                        delta
-                            .current_stability
-                            .clone()
-                            .unwrap_or_else(|| "NA".to_string()),
-                        delta
-                            .baseline_status
-                            .clone()
-                            .unwrap_or_else(|| "NA".to_string()),
-                        delta
-                            .current_status
-                            .clone()
-                            .unwrap_or_else(|| "NA".to_string()),
-                    ]
+                    delta_row(delta, record)
                 })
                 .collect(),
         );
     }
+}
 
-    if !comparison.new_records.is_empty() {
-        content.push_str("### New Records\n\n");
-        write_table(
-            content,
-            &[
-                "adapter", "suite", "case", "scenario", "metric", "value", "status",
-            ],
-            comparison
-                .new_records
-                .iter()
-                .map(|record| {
-                    vec![
-                        record.adapter.clone(),
-                        record.suite.clone(),
-                        record.case.clone(),
-                        record.scenario.clone().unwrap_or_else(|| "NA".to_string()),
-                        record.metric.clone(),
-                        format_measurement(record.value, &record.unit),
-                        record.status.clone().unwrap_or_else(|| "NA".to_string()),
-                    ]
-                })
-                .collect(),
-        );
-    }
+fn delta_row(delta: &BenchmarkDelta, record: Option<&BenchmarkRecord>) -> Vec<String> {
+    let unit = record.map_or("value", |value| value.unit.as_str());
+    vec![
+        delta.suite.clone(),
+        delta.case.clone(),
+        record
+            .and_then(|value| value.scenario.clone())
+            .unwrap_or_else(|| "NA".to_string()),
+        delta.metric.clone(),
+        delta
+            .baseline_value
+            .map_or_else(|| "NA".to_string(), |value| format_measurement(value, unit)),
+        format_measurement(delta.current_value, unit),
+        format_delta(delta.delta_pct),
+        format_delta(delta.directional_delta_pct),
+        delta
+            .baseline_stability
+            .clone()
+            .unwrap_or_else(|| "NA".to_string()),
+        delta
+            .current_stability
+            .clone()
+            .unwrap_or_else(|| "NA".to_string()),
+        delta
+            .baseline_status
+            .clone()
+            .unwrap_or_else(|| "NA".to_string()),
+        delta
+            .current_status
+            .clone()
+            .unwrap_or_else(|| "NA".to_string()),
+    ]
+}
 
-    if !comparison.missing_records.is_empty() {
-        content.push_str("### Missing Records\n\n");
-        write_table(
-            content,
-            &[
-                "adapter", "suite", "case", "scenario", "metric", "value", "status",
-            ],
-            comparison
-                .missing_records
-                .iter()
-                .map(|record| {
-                    vec![
-                        record.adapter.clone(),
-                        record.suite.clone(),
-                        record.case.clone(),
-                        record.scenario.clone().unwrap_or_else(|| "NA".to_string()),
-                        record.metric.clone(),
-                        format_measurement(record.value, &record.unit),
-                        record.status.clone().unwrap_or_else(|| "NA".to_string()),
-                    ]
-                })
-                .collect(),
-        );
+fn write_record_change_section(content: &mut String, title: &str, records: &[BenchmarkRecord]) {
+    if records.is_empty() {
+        return;
     }
+    let _ = writeln!(content, "### {title}");
+    let _ = writeln!(content);
+    write_table(
+        content,
+        &[
+            "adapter", "suite", "case", "scenario", "metric", "value", "status",
+        ],
+        records.iter().map(record_change_row).collect(),
+    );
+}
+
+fn record_change_row(record: &BenchmarkRecord) -> Vec<String> {
+    vec![
+        record.adapter.clone(),
+        record.suite.clone(),
+        record.case.clone(),
+        record.scenario.clone().unwrap_or_else(|| "NA".to_string()),
+        record.metric.clone(),
+        format_measurement(record.value, &record.unit),
+        record.status.clone().unwrap_or_else(|| "NA".to_string()),
+    ]
 }
 
 fn write_sweep_section(content: &mut String, sweeps: &[SweepGroup]) {

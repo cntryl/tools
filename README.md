@@ -63,4 +63,4 @@ cntryl-tools summarize-benchmarks
 `summarize-benchmarks` reads cntryl-stress v0.3 artifacts from `target/stress/**/latest.json`.
 Stress artifacts must use `schema_version: "cntryl-stress.v2"`.
 
-The stress adapter normalizes each v2 summary into the shared benchmark manifest, preserves structured parameters as report tags for sweep detection, and writes `target/stress/stress_summary.csv` alongside `target/bench_results.json` and `target/bench_summary.md`.
+The stress adapter normalizes each v2 summary into the shared benchmark manifest, preserves structured parameters as report tags for sweep detection, and writes `target/stress/stress_summary.csv` alongside `target/bench_results.json` and `target/bench_summary.md`. Legacy non-v2 stress artifacts are skipped with a warning so stale local `target/stress` directories do not block current v2 summaries.

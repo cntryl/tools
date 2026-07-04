@@ -33,8 +33,9 @@ impl BenchmarkAdapter for StressAdapter {
         for path in latest_json_files(&adapter_config.input_root) {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let run_file: StressRunFile = serde_json::from_str(&text)
-                .with_context(|| format!("failed to parse {}", path.display()))?;
+            let Some(run_file) = parse_stress_run_file(&text, &path)? else {
+                continue;
+            };
             records.extend(records_from_stress_run(
                 &run_file,
                 &path,
@@ -45,6 +46,26 @@ impl BenchmarkAdapter for StressAdapter {
 
         Ok(records)
     }
+}
+
+fn parse_stress_run_file(text: &str, path: &Path) -> Result<Option<StressRunFile>> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str);
+    if schema_version != Some(STRESS_SCHEMA_VERSION) {
+        eprintln!(
+            "Skipping unsupported stress artifact {}: schema_version={}",
+            path.display(),
+            schema_version.unwrap_or("missing")
+        );
+        return Ok(None);
+    }
+
+    let run_file: StressRunFile = serde_json::from_value(value)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(run_file))
 }
 
 fn latest_json_files(root: &Path) -> impl Iterator<Item = std::path::PathBuf> + '_ {
@@ -463,6 +484,27 @@ mod tests {
 
     fn parse_run(json: &str) -> StressRunFile {
         serde_json::from_str(json).expect("valid stress run")
+    }
+
+    #[test]
+    fn should_skip_legacy_stress_artifact_without_v2_schema() {
+        let parsed = parse_stress_run_file(
+            r#"{"suite": "old", "results": []}"#,
+            &PathBuf::from("target/stress/old/latest.json"),
+        )
+        .expect("legacy artifact should not fail collection");
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn should_fail_malformed_v2_stress_artifact() {
+        let result = parse_stress_run_file(
+            r#"{"schema_version": "cntryl-stress.v2"}"#,
+            &PathBuf::from("target/stress/bad/latest.json"),
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

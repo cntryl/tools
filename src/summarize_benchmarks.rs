@@ -28,7 +28,7 @@ pub struct SummarizeBenchmarksArgs {
 }
 
 pub fn run(args: SummarizeBenchmarksArgs) -> Result<i32> {
-    let config = BenchSummaryConfig::for_root(args.root, args.product_name, args.report_title)?;
+    let config = BenchSummaryConfig::for_root(&args.root, args.product_name, args.report_title)?;
     run_with_config(&config)
 }
 

@@ -12,7 +12,7 @@ use super::super::config::{BenchSummaryConfig, StressAdapterConfig};
 use super::super::model::{BenchmarkRecord, MetricDirection};
 use super::BenchmarkAdapter;
 
-const STRESS_SCHEMA_VERSION: &str = "cntryl-stress.v2";
+const STRESS_SCHEMA_VERSION: &str = "cntryl-stress.v1";
 
 pub struct StressAdapter;
 
@@ -33,9 +33,7 @@ impl BenchmarkAdapter for StressAdapter {
         for path in latest_json_files(&adapter_config.input_root) {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let Some(run_file) = parse_stress_run_file(&text, &path)? else {
-                continue;
-            };
+            let run_file = parse_stress_run_file(&text, &path)?;
             records.extend(records_from_stress_run(
                 &run_file,
                 &path,
@@ -48,24 +46,23 @@ impl BenchmarkAdapter for StressAdapter {
     }
 }
 
-fn parse_stress_run_file(text: &str, path: &Path) -> Result<Option<StressRunFile>> {
+fn parse_stress_run_file(text: &str, path: &Path) -> Result<StressRunFile> {
     let value: serde_json::Value = serde_json::from_str(text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     let schema_version = value
         .get("schema_version")
         .and_then(serde_json::Value::as_str);
     if schema_version != Some(STRESS_SCHEMA_VERSION) {
-        eprintln!(
-            "Skipping unsupported stress artifact {}: schema_version={}",
+        bail!(
+            "unsupported stress schema in {}: schema_version={}; expected {STRESS_SCHEMA_VERSION}",
             path.display(),
-            schema_version.unwrap_or("missing")
+            schema_version.unwrap_or("missing"),
         );
-        return Ok(None);
     }
 
     let run_file: StressRunFile = serde_json::from_value(value)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(Some(run_file))
+    Ok(run_file)
 }
 
 fn latest_json_files(root: &Path) -> impl Iterator<Item = std::path::PathBuf> + '_ {
@@ -92,45 +89,92 @@ fn records_from_stress_run(
     }
 
     let elapsed_by_benchmark = measured_elapsed_by_benchmark(&run_file.samples);
-    run_file
-        .summaries
-        .iter()
-        .filter_map(|summary| {
-            record_from_summary(
-                run_file,
-                summary,
-                elapsed_by_benchmark.get(&summary.benchmark_id).copied(),
-                path,
-                config,
-                adapter_config,
-            )
-            .transpose()
-        })
-        .collect()
+    let mut records = Vec::new();
+    for summary in &run_file.summaries {
+        records.extend(records_from_summary(
+            run_file,
+            summary,
+            elapsed_by_benchmark.get(&summary.benchmark_id).copied(),
+            path,
+            config,
+            adapter_config,
+        )?);
+    }
+    Ok(records)
 }
 
-fn record_from_summary(
+fn records_from_summary(
     run_file: &StressRunFile,
     summary: &StressSummary,
     median_elapsed_ns: Option<f64>,
     path: &Path,
     config: &BenchSummaryConfig,
     adapter_config: &StressAdapterConfig,
-) -> Result<Option<BenchmarkRecord>> {
-    let Some(stats) = summary.stats.as_ref() else {
-        return Ok(None);
+) -> Result<Vec<BenchmarkRecord>> {
+    let context = StressRecordContext {
+        run_file,
+        median_elapsed_ns,
+        path,
+        config,
+        adapter_config,
     };
-    let metric = metric_spec(&summary.primary_metric)?;
-    let Some(value) = primary_value(metric.primary_metric, stats) else {
-        return Ok(None);
-    };
-    if !value.is_finite() || value <= 0.0 {
-        return Ok(None);
+    let mut records = Vec::new();
+    if let Some(stats) = summary.stats.as_ref() {
+        let metric = metric_spec(&summary.primary_metric)?;
+        if let Some(record) = record_from_stats(&context, summary, metric, stats) {
+            records.push(record);
+        }
+    }
+
+    for (metric_name, stats) in [
+        ("ns_per_op", summary.ns_per_op.as_ref()),
+        ("allocs_per_op", summary.allocs_per_op.as_ref()),
+        ("bytes_per_op", summary.bytes_per_op.as_ref()),
+    ] {
+        if summary.primary_metric == metric_name {
+            continue;
+        }
+        let Some(stats) = stats else {
+            continue;
+        };
+        let metric = metric_spec(metric_name)?;
+        if let Some(record) = record_from_stats(&context, summary, metric, stats) {
+            records.push(record);
+        }
+    }
+
+    Ok(records)
+}
+
+struct StressRecordContext<'a> {
+    run_file: &'a StressRunFile,
+    median_elapsed_ns: Option<f64>,
+    path: &'a Path,
+    config: &'a BenchSummaryConfig,
+    adapter_config: &'a StressAdapterConfig,
+}
+
+fn record_from_stats(
+    context: &StressRecordContext<'_>,
+    summary: &StressSummary,
+    metric: StressMetricSpec,
+    stats: &StressStats,
+) -> Option<BenchmarkRecord> {
+    let value = primary_value(metric.primary_metric, stats)?;
+    if !value.is_finite()
+        || value < 0.0
+        || (value == 0.0
+            && !matches!(
+                metric.primary_metric,
+                StressPrimaryMetric::AllocsPerOp | StressPrimaryMetric::BytesPerOp
+            ))
+    {
+        return None;
     }
     if metric.primary_metric == StressPrimaryMetric::Throughput
-        && value > adapter_config.max_reasonable_throughput_ops_per_s
+        && value > context.adapter_config.max_reasonable_throughput_ops_per_s
     {
-        return Ok(None);
+        return None;
     }
 
     let scenario = summary
@@ -139,25 +183,31 @@ fn record_from_summary(
         .or_else(|| summary.metadata.get("scenario"))
         .cloned();
     let tags = summary.parameters.clone();
-    let mut metadata = summary_metadata(run_file, summary, stats, median_elapsed_ns);
+    let mut metadata = summary_metadata(
+        context.run_file,
+        summary,
+        stats,
+        metric.name,
+        context.median_elapsed_ns,
+    );
     metadata.insert(
         "meets_sample_floor".to_string(),
-        (summary.measured_samples >= adapter_config.authoritative_min_samples).to_string(),
+        (summary.measured_samples >= context.adapter_config.authoritative_min_samples).to_string(),
     );
-    if let Some(median_elapsed_ns) = median_elapsed_ns {
+    if let Some(median_elapsed_ns) = context.median_elapsed_ns {
         metadata.insert(
             "meets_runtime_floor".to_string(),
-            (median_elapsed_ns >= adapter_config.min_reasonable_duration_ns).to_string(),
+            (median_elapsed_ns >= context.adapter_config.min_reasonable_duration_ns).to_string(),
         );
     }
     for (key, value) in &summary.metadata {
         metadata.insert(format!("stress_metadata_{key}"), value.clone());
     }
 
-    Ok(Some(BenchmarkRecord {
+    Some(BenchmarkRecord {
         id: record_id(summary, metric.name, scenario.as_deref()),
         adapter: "stress".to_string(),
-        suite: run_file.suite.clone(),
+        suite: context.run_file.suite.clone(),
         case: stress_case_name(&summary.name),
         scenario,
         metric: metric.name.to_string(),
@@ -169,14 +219,14 @@ fn record_from_summary(
         metric_direction: metric.direction,
         stability: Some(classify_stability(
             Some(stats.relative_std_dev),
-            &config.stability_thresholds,
+            &context.config.stability_thresholds,
         )),
         status: Some(summary_status(summary)),
         rel_stddev: Some(stats.relative_std_dev),
         tags,
         metadata,
-        source_file: path.display().to_string(),
-    }))
+        source_file: context.path.display().to_string(),
+    })
 }
 
 fn summary_status(summary: &StressSummary) -> String {
@@ -191,6 +241,7 @@ fn summary_metadata(
     run_file: &StressRunFile,
     summary: &StressSummary,
     stats: &StressStats,
+    record_metric: &str,
     median_elapsed_ns: Option<f64>,
 ) -> BTreeMap<String, String> {
     let mut metadata = BTreeMap::from([
@@ -198,6 +249,7 @@ fn summary_metadata(
         ("name".to_string(), summary.name.clone()),
         ("tier".to_string(), summary.tier.to_string()),
         ("primary_metric".to_string(), summary.primary_metric.clone()),
+        ("record_metric".to_string(), record_metric.to_string()),
         ("quality".to_string(), summary.quality.clone()),
         ("run_profile".to_string(), run_file.run_profile.clone()),
         (
@@ -241,6 +293,15 @@ fn summary_metadata(
         ("p95".to_string(), stats.p95.to_string()),
         ("p99".to_string(), stats.p99.to_string()),
     ]);
+    if !summary.flags.is_empty() {
+        metadata.insert("flags".to_string(), summary.flags.join(","));
+    }
+    if let Some(overhead) = &summary.overhead_ns_per_op {
+        metadata.insert(
+            "overhead_ns_per_op_mean".to_string(),
+            overhead.mean.to_string(),
+        );
+    }
     if let Some(median_elapsed_ns) = median_elapsed_ns {
         metadata.insert(
             "median_sample_elapsed_ns".to_string(),
@@ -319,10 +380,22 @@ fn metric_spec(primary_metric: &str) -> Result<StressMetricSpec> {
             unit: "ns",
             direction: MetricDirection::LowerIsBetter,
         }),
-        "elapsed_per_operation" => Ok(StressMetricSpec {
-            primary_metric: StressPrimaryMetric::ElapsedPerOperation,
-            name: "elapsed_per_operation_ns",
+        "ns_per_op" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::NsPerOp,
+            name: "ns_per_op",
             unit: "ns",
+            direction: MetricDirection::LowerIsBetter,
+        }),
+        "allocs_per_op" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::AllocsPerOp,
+            name: "allocs_per_op",
+            unit: "allocs/op",
+            direction: MetricDirection::LowerIsBetter,
+        }),
+        "bytes_per_op" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::BytesPerOp,
+            name: "bytes_per_op",
+            unit: "B/op",
             direction: MetricDirection::LowerIsBetter,
         }),
         other => bail!("unknown stress primary metric '{other}'"),
@@ -331,7 +404,10 @@ fn metric_spec(primary_metric: &str) -> Result<StressMetricSpec> {
 
 fn primary_value(metric: StressPrimaryMetric, stats: &StressStats) -> Option<f64> {
     let value = match metric {
-        StressPrimaryMetric::Throughput | StressPrimaryMetric::ElapsedPerOperation => stats.mean,
+        StressPrimaryMetric::Throughput
+        | StressPrimaryMetric::NsPerOp
+        | StressPrimaryMetric::AllocsPerOp
+        | StressPrimaryMetric::BytesPerOp => stats.mean,
         StressPrimaryMetric::LatencyP95 => stats.p95,
     };
     value.is_finite().then_some(value)
@@ -341,7 +417,9 @@ fn primary_value(metric: StressPrimaryMetric, stats: &StressStats) -> Option<f64
 enum StressPrimaryMetric {
     Throughput,
     LatencyP95,
-    ElapsedPerOperation,
+    NsPerOp,
+    AllocsPerOp,
+    BytesPerOp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -373,8 +451,14 @@ struct StressSummary {
     warmup_samples: usize,
     cooldown_samples: usize,
     stats: Option<StressStats>,
+    ns_per_op: Option<StressStats>,
+    overhead_ns_per_op: Option<StressStats>,
+    allocs_per_op: Option<StressStats>,
+    bytes_per_op: Option<StressStats>,
     quality: String,
     correctness: StressCorrectness,
+    #[serde(default)]
+    flags: Vec<String>,
     #[serde(default)]
     parameters: BTreeMap<String, String>,
     #[serde(default)]
@@ -487,20 +571,19 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_legacy_stress_artifact_without_v2_schema() {
-        let parsed = parse_stress_run_file(
+    fn should_reject_stress_artifact_without_v1_schema() {
+        let result = parse_stress_run_file(
             r#"{"suite": "old", "results": []}"#,
             &PathBuf::from("target/stress/old/latest.json"),
-        )
-        .expect("legacy artifact should not fail collection");
+        );
 
-        assert!(parsed.is_none());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn should_fail_malformed_v2_stress_artifact() {
+    fn should_fail_malformed_v1_stress_artifact() {
         let result = parse_stress_run_file(
-            r#"{"schema_version": "cntryl-stress.v2"}"#,
+            r#"{"schema_version": "cntryl-stress.v1"}"#,
             &PathBuf::from("target/stress/bad/latest.json"),
         );
 
@@ -508,11 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn should_collect_v2_throughput_summary() {
+    fn should_collect_v1_throughput_summary() {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v2",
+                "schema_version": "cntryl-stress.v1",
                 "suite": "tier4_queue",
                 "run_profile": "release",
                 "samples": [
@@ -601,11 +684,138 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn should_collect_v1_micro_and_allocation_records() {
+        let config = config();
+        let run = parse_run(
+            r#"{
+                "schema_version": "cntryl-stress.v1",
+                "suite": "tier1_hot_path",
+                "run_profile": "release",
+                "samples": [
+                    {"benchmark_id": "tier1_hot_path/parser::header", "phase": "measured", "elapsed_ns": 10000000}
+                ],
+                "summaries": [{
+                    "benchmark_id": "tier1_hot_path/parser::header",
+                    "name": "parser::header",
+                    "tier": 1,
+                    "primary_metric": "ns_per_op",
+                    "measured_samples": 10,
+                    "warmup_samples": 1,
+                    "cooldown_samples": 0,
+                    "stats": {
+                        "mean": 42.0,
+                        "median": 41.0,
+                        "min": 40.0,
+                        "max": 45.0,
+                        "std_dev": 1.0,
+                        "relative_std_dev": 0.02,
+                        "confidence_interval_95": {"lower": 41.0, "upper": 43.0},
+                        "p50": 41.0,
+                        "p95": 44.0,
+                        "p99": 45.0
+                    },
+                    "ns_per_op": {
+                        "mean": 42.0,
+                        "median": 41.0,
+                        "min": 40.0,
+                        "max": 45.0,
+                        "std_dev": 1.0,
+                        "relative_std_dev": 0.02,
+                        "confidence_interval_95": {"lower": 41.0, "upper": 43.0},
+                        "p50": 41.0,
+                        "p95": 44.0,
+                        "p99": 45.0
+                    },
+                    "overhead_ns_per_op": {
+                        "mean": 2.0,
+                        "median": 2.0,
+                        "min": 1.0,
+                        "max": 3.0,
+                        "std_dev": 0.5,
+                        "relative_std_dev": 0.25,
+                        "confidence_interval_95": {"lower": 1.5, "upper": 2.5},
+                        "p50": 2.0,
+                        "p95": 3.0,
+                        "p99": 3.0
+                    },
+                    "allocs_per_op": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "min": 0.0,
+                        "max": 0.0,
+                        "std_dev": 0.0,
+                        "relative_std_dev": 0.0,
+                        "confidence_interval_95": {"lower": 0.0, "upper": 0.0},
+                        "p50": 0.0,
+                        "p95": 0.0,
+                        "p99": 0.0
+                    },
+                    "bytes_per_op": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "min": 0.0,
+                        "max": 0.0,
+                        "std_dev": 0.0,
+                        "relative_std_dev": 0.0,
+                        "confidence_interval_95": {"lower": 0.0, "upper": 0.0},
+                        "p50": 0.0,
+                        "p95": 0.0,
+                        "p99": 0.0
+                    },
+                    "quality": "authoritative",
+                    "flags": ["validated_micro"],
+                    "correctness": {
+                        "passed": true,
+                        "counters": {
+                            "attempted": 1000,
+                            "completed": 1000,
+                            "failures": 0,
+                            "timeouts": 0,
+                            "duplicates": 0,
+                            "dropped": 0,
+                            "validation_errors": 0
+                        },
+                        "errors": []
+                    },
+                    "parameters": {"operation": "parse_header"}
+                }]
+            }"#,
+        );
+
+        let records = records_from_stress_run(
+            &run,
+            &PathBuf::from("target/stress/tier1_hot_path/latest.json"),
+            &config,
+            adapter_config(&config),
+        )
+        .expect("records");
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].metric, "ns_per_op");
+        assert_eq!(records[0].unit, "ns");
+        assert_eq!(records[0].metric_direction, MetricDirection::LowerIsBetter);
+        assert_close(records[0].value, 42.0);
+        assert_eq!(
+            records[0].metadata.get("overhead_ns_per_op_mean"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            records[0].metadata.get("flags"),
+            Some(&"validated_micro".to_string())
+        );
+        assert_eq!(records[1].metric, "allocs_per_op");
+        assert_eq!(records[1].unit, "allocs/op");
+        assert_eq!(records[2].metric, "bytes_per_op");
+        assert_eq!(records[2].unit, "B/op");
+    }
+
+    #[test]
     fn should_map_latency_p95_as_lower_is_better() {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v2",
+                "schema_version": "cntryl-stress.v1",
                 "suite": "tier3_rpc",
                 "run_profile": "release",
                 "samples": [],
@@ -664,11 +874,11 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_non_v2_stress_schema() {
+    fn should_reject_non_current_stress_schema() {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v1",
+                "schema_version": "cntryl-stress.v2",
                 "suite": "old",
                 "run_profile": "smoke",
                 "summaries": [],

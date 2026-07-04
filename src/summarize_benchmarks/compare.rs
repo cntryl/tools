@@ -88,7 +88,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::model::{BenchmarkManifest, ComparisonSummary, MetricDirection};
+    use crate::model::{
+        BenchmarkManifest, ComparisonSummary, MetricDirection, BENCHMARK_MANIFEST_SCHEMA_VERSION,
+    };
 
     fn record(id: &str, case: &str, direction: MetricDirection, value: f64) -> BenchmarkRecord {
         BenchmarkRecord {
@@ -121,7 +123,7 @@ mod tests {
 
     fn manifest(records: Vec<BenchmarkRecord>) -> BenchmarkManifest {
         BenchmarkManifest {
-            schema_version: 2,
+            schema_version: BENCHMARK_MANIFEST_SCHEMA_VERSION,
             generated_at: "now".to_string(),
             commit_hash: None,
             comparison_summary: ComparisonSummary::default(),

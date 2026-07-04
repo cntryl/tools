@@ -1,15 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use anyhow::Result;
-
 use super::config::BenchSummaryConfig;
 use super::model::{BenchmarkRecord, SweepGroup, SweepPoint};
 
 pub fn detect_sweep_groups(
     records: &[BenchmarkRecord],
     config: &BenchSummaryConfig,
-) -> Result<Vec<SweepGroup>> {
+) -> Vec<SweepGroup> {
     let mut groups = BTreeMap::<String, SweepGroup>::new();
 
     for record in records {
@@ -48,8 +46,10 @@ pub fn detect_sweep_groups(
                         .prefix_capture
                         .as_ref()
                         .and_then(|name| captures.name(name))
-                        .map(|value| value.as_str().to_string())
-                        .unwrap_or_else(|| pattern.parameter.clone()),
+                        .map_or_else(
+                            || pattern.parameter.clone(),
+                            |value| value.as_str().to_string(),
+                        ),
                     captures
                         .name(&pattern.value_capture)
                         .map(|value| value.as_str().to_string())
@@ -108,7 +108,7 @@ pub fn detect_sweep_groups(
     }
 
     output.sort_by(|left, right| left.title.cmp(&right.title));
-    Ok(output)
+    output
 }
 
 fn tag_sweep_parameters(
@@ -300,7 +300,7 @@ mod tests {
         ];
 
         // Act
-        let groups = detect_sweep_groups(&records, &config).expect("detect sweep groups");
+        let groups = detect_sweep_groups(&records, &config);
 
         // Assert
         assert_eq!(groups.len(), 1);
@@ -326,7 +326,7 @@ mod tests {
         ];
 
         // Act
-        let groups = detect_sweep_groups(&records, &config).expect("detect sweep groups");
+        let groups = detect_sweep_groups(&records, &config);
 
         // Assert
         assert_eq!(groups.len(), 2);
@@ -365,7 +365,7 @@ mod tests {
         ];
 
         // Act
-        let groups = detect_sweep_groups(&records, &config).expect("detect sweep groups");
+        let groups = detect_sweep_groups(&records, &config);
 
         // Assert
         assert_eq!(groups.len(), 1);

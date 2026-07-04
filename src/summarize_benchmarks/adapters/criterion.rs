@@ -29,9 +29,9 @@ impl BenchmarkAdapter for CriterionAdapter {
         let mut records = Vec::new();
         for path in WalkDir::new(&adapter_config.input_root)
             .into_iter()
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.into_path())
+            .map(walkdir::DirEntry::into_path)
             .filter(|path| path.ends_with(Path::new("new").join("estimates.json")))
         {
             let text = fs::read_to_string(&path)

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Args;
 use chrono::Utc;
+use clap::Args;
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -16,7 +16,7 @@ pub struct GenerateInventoryArgs {
     pub output: PathBuf,
 }
 
-pub fn run(args: GenerateInventoryArgs) -> Result<i32> {
+pub fn run(args: &GenerateInventoryArgs) -> Result<i32> {
     let root = args
         .root
         .canonicalize()
@@ -107,10 +107,7 @@ fn gather_named_functions(
                 .get(1)
                 .map(|value| value.as_str())
                 .unwrap_or_default();
-            if is_commented_out(
-                &text,
-                captures.get(0).map(|value| value.start()).unwrap_or(0),
-            ) {
+            if is_commented_out(&text, captures.get(0).map_or(0, |value| value.start())) {
                 continue;
             }
             names.push(matched.to_string());
@@ -127,10 +124,7 @@ fn gather_named_functions(
 }
 
 fn is_commented_out(text: &str, match_start: usize) -> bool {
-    let line_start = text[..match_start]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
+    let line_start = text[..match_start].rfind('\n').map_or(0, |index| index + 1);
     let prefix = text[line_start..match_start].trim();
     prefix.starts_with("//") || prefix.starts_with("///") || prefix.starts_with("/*")
 }
@@ -141,7 +135,7 @@ fn rust_files_under(root: &Path) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
-        .map(|entry| entry.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect();
     files.sort();
     files
@@ -165,8 +159,7 @@ fn render_markdown(
     lines.push("# Test & Bench Inventory".to_string());
     lines.push(String::new());
     lines.push(format!(
-        "_Generated {} by `cntryl-tools generate-inventory`._",
-        generated_at
+        "_Generated {generated_at} by `cntryl-tools generate-inventory`._"
     ));
     lines.push(String::new());
     lines.push("Complete inventory of all test and benchmark functions across cntryl.".to_string());

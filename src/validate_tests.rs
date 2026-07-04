@@ -52,11 +52,7 @@ pub fn run(args: ValidateTestsArgs) -> Result<i32> {
 }
 
 fn exit_code(results: &[TestResult]) -> i32 {
-    if results.iter().all(TestResult::is_compliant) {
-        0
-    } else {
-        1
-    }
+    i32::from(!results.iter().all(TestResult::is_compliant))
 }
 
 fn write_json(path: &Path, results: &[TestResult]) -> Result<()> {
@@ -95,7 +91,7 @@ fn find_all_rust_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
-        .map(|entry| entry.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect()
 }
 
@@ -203,10 +199,7 @@ fn analyze_test(
     }
 
     if act_count > 1 {
-        issues.push(format!(
-            "MULTI-BEHAVIOR: Has {} '// Act' sections",
-            act_count
-        ));
+        issues.push(format!("MULTI-BEHAVIOR: Has {act_count} '// Act' sections"));
     }
 
     if test_name.contains("_and_") {
@@ -245,6 +238,7 @@ fn analyze_test(
     })
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn print_summary(results: &[TestResult]) {
     println!("Scanning all tests for guideline violations...\n");
 
@@ -340,6 +334,7 @@ fn print_summary(results: &[TestResult]) {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn print_file_results(file: &Path, results: &[TestResult]) {
     println!("Checking tests in: {}\n", file.display());
 

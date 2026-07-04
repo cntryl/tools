@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub const BENCHMARK_MANIFEST_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkManifest {
     pub schema_version: u32,

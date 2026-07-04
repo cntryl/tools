@@ -5,9 +5,9 @@ use super::model::{BenchmarkRecord, ComparisonSummary};
 pub fn classify_stability(rel_stddev: Option<f64>, thresholds: &StabilityThresholds) -> String {
     match rel_stddev {
         None => "unknown".to_string(),
-        Some(value) if value <= thresholds.stable_rsd_max => "stable".to_string(),
-        Some(value) if value <= thresholds.acceptable_rsd_max => "acceptable".to_string(),
-        Some(value) if value <= thresholds.noisy_rsd_max => "noisy".to_string(),
+        Some(value) if value <= thresholds.stable => "stable".to_string(),
+        Some(value) if value <= thresholds.acceptable => "acceptable".to_string(),
+        Some(value) if value <= thresholds.noisy => "noisy".to_string(),
         Some(_) => "untrustworthy".to_string(),
     }
 }
@@ -197,9 +197,10 @@ fn record_label(record: &BenchmarkRecord) -> String {
 }
 
 fn format_rel_stddev(value: Option<f64>) -> String {
-    value
-        .map(|value| format!("{:.1}%", value * 100.0))
-        .unwrap_or_else(|| "NA".to_string())
+    value.map_or_else(
+        || "NA".to_string(),
+        |value| format!("{:.1}%", value * 100.0),
+    )
 }
 
 fn format_delta(value: Option<f64>) -> String {

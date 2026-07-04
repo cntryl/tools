@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -8,7 +8,6 @@ use super::model::BenchmarkRecord;
 
 #[derive(Debug, Clone)]
 pub struct BenchSummaryConfig {
-    pub schema_version: u32,
     pub product_name: String,
     pub report_title: String,
     pub root: PathBuf,
@@ -46,7 +45,7 @@ pub struct StressAdapterConfig {
     pub csv_output: Option<PathBuf>,
     pub min_reasonable_duration_ns: f64,
     pub max_reasonable_throughput_ops_per_s: f64,
-    pub authoritative_min_runs: usize,
+    pub authoritative_min_samples: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -57,9 +56,9 @@ pub struct SummaryThresholds {
 
 #[derive(Debug, Clone)]
 pub struct StabilityThresholds {
-    pub stable_rsd_max: f64,
-    pub acceptable_rsd_max: f64,
-    pub noisy_rsd_max: f64,
+    pub stable: f64,
+    pub acceptable: f64,
+    pub noisy: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -87,13 +86,13 @@ impl BenchSummaryConfig {
         let root = root
             .canonicalize()
             .with_context(|| format!("failed to resolve repository root {}", root.display()))?;
-        Self::build(root, product_name.into(), report_title.into())
+        Self::build(&root, product_name.into(), report_title.into())
     }
 
     #[cfg(test)]
     pub fn for_tests() -> Self {
         Self::build(
-            PathBuf::from("."),
+            Path::new("."),
             "cntryl".to_string(),
             "Cntryl Benchmark Report".to_string(),
         )
@@ -135,10 +134,10 @@ impl BenchSummaryConfig {
 
         self.ignored_patterns
             .iter()
-            .any(|pattern| self.matches_ignore_pattern(record, pattern))
+            .any(|pattern| Self::matches_ignore_pattern(record, pattern))
     }
 
-    fn matches_ignore_pattern(&self, record: &BenchmarkRecord, pattern: &Regex) -> bool {
+    fn matches_ignore_pattern(record: &BenchmarkRecord, pattern: &Regex) -> bool {
         if pattern.is_match(&record.id)
             || pattern.is_match(&record.adapter)
             || pattern.is_match(&record.suite)
@@ -166,161 +165,153 @@ impl BenchSummaryConfig {
         })
     }
 
-    fn build(root: PathBuf, product_name: String, report_title: String) -> Result<Self> {
+    fn build(root: &Path, product_name: String, report_title: String) -> Result<Self> {
         Ok(Self {
-            schema_version: 2,
             product_name,
             report_title,
             baseline_file: root.join("config").join("bench_baseline.json"),
             manifest_file: root.join("target").join("bench_results.json"),
             markdown_report_file: root.join("target").join("bench_summary.md"),
-            adapters: AdapterConfigs {
-                criterion: Some(CriterionAdapterConfig {
-                    input_root: root.join("target").join("criterion"),
-                    csv_output: Some(
-                        root.join("target")
-                            .join("criterion")
-                            .join("summarize_benchmarks.csv"),
-                    ),
-                    min_reasonable_mean_ns: 1.0,
-                    max_reasonable_mean_ns: 1e12,
-                }),
-                stress: Some(StressAdapterConfig {
-                    input_root: root.join("target").join("stress"),
-                    csv_output: Some(
-                        root.join("target")
-                            .join("stress")
-                            .join("stress_summary.csv"),
-                    ),
-                    min_reasonable_duration_ns: 3e9,
-                    max_reasonable_throughput_ops_per_s: 1e9,
-                    authoritative_min_runs: 5,
-                }),
-            },
+            adapters: default_adapters(root),
             thresholds: SummaryThresholds {
                 warning_regression_pct: 10.0,
                 critical_regression_pct: 25.0,
             },
-            stability_thresholds: StabilityThresholds {
-                stable_rsd_max: 0.05,
-                acceptable_rsd_max: 0.10,
-                noisy_rsd_max: 0.20,
-            },
-            authoritative_statuses: ["authoritative"].into_iter().map(str::to_string).collect(),
-            authoritative_stabilities: ["stable", "acceptable"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ignored_exact_ids: [
-                "hotpath_actor_messaging/actorref_clone_overhead",
-                "hotpath_context/timer_id_new",
-                "hotpath_envelope/messageid_new",
-                "hotpath_envelope/metadata_extraction",
-                "hotpath_envelope/is_expired_not_expired",
-                "hotpath_envelope/is_expired_expired",
-                "hotpath_envelope/is_expired_no_deadline",
-                "hotpath_routing/full_address_from_string",
-                "hotpath_routing/route_address_clone",
-                "hotpath_routing/route_address_family_access",
-                "hotpath_routing/route_address_route_access",
-                "hotpath_routing/route_as_str",
-                "hotpath_routing/route_clone_long",
-                "hotpath_routing/route_clone_short",
-                "hotpath_routing/route_equality_different",
-                "hotpath_routing/route_equality_same",
-                "hotpath_routing/route_family_from_u32",
-                "hotpath_routing/route_family_new_u64",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            stability_thresholds: default_stability_thresholds(),
+            authoritative_statuses: string_set(["authoritative", "acceptable"]),
+            authoritative_stabilities: string_set(["stable", "acceptable"]),
+            ignored_exact_ids: default_ignored_exact_ids(),
             ignored_patterns: vec![Regex::new(r"schedule_system_scan_and_fire")?],
-            sweep: SweepConfig {
-                tag_keys: [
-                    "client_count",
-                    "subscriber_count",
-                    "publisher_count",
-                    "worker_count",
-                    "pending_count",
-                    "route_count",
-                    "queue_count",
-                    "area_count",
-                    "family_count",
-                    "payload_size",
-                    "message_size",
-                    "fanout_size",
-                    "batch_size",
-                    "list_size",
-                    "depth",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-                tag_key_suffixes: vec![
-                    "_count".to_string(),
-                    "_size".to_string(),
-                    "_depth".to_string(),
-                ],
-                context_tag_keys: vec![
-                    "measurement_scope".to_string(),
-                    "match_kind".to_string(),
-                    "ready_state".to_string(),
-                    "operation".to_string(),
-                    "layer".to_string(),
-                ],
-                name_patterns: vec![
-                    SweepNamePatternConfig {
-                        parameter: "concurrency".to_string(),
-                        regex: Regex::new(
-                            r"(?P<prefix>scaling|concurrency|clients?)_(?P<value>\d+[a-zA-Z]*)",
-                        )?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "subscriber_count".to_string(),
-                        regex: Regex::new(
-                            r"(?P<prefix>subscribers?|subscriber_count)_(?P<value>\d+[a-zA-Z]*)",
-                        )?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "payload_size".to_string(),
-                        regex: Regex::new(
-                            r"(?P<prefix>payload|message|msg)_(?P<value>\d+[a-zA-Z]*)",
-                        )?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "route_depth".to_string(),
-                        regex: Regex::new(r"(?P<prefix>depth)_(?P<value>\d+[a-zA-Z]*)")?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "fanout_size".to_string(),
-                        regex: Regex::new(r"(?P<prefix>fanout)_(?P<value>\d+[a-zA-Z]*)")?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "batch_size".to_string(),
-                        regex: Regex::new(r"(?P<prefix>batch|batch_size)_(?P<value>\d+[a-zA-Z]*)")?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                    SweepNamePatternConfig {
-                        parameter: "list_size".to_string(),
-                        regex: Regex::new(r"(?P<prefix>list)_(?P<value>\d+[a-zA-Z]*)")?,
-                        value_capture: "value".to_string(),
-                        prefix_capture: Some("prefix".to_string()),
-                    },
-                ],
-            },
+            sweep: default_sweep_config()?,
             suite_display_overrides: BTreeMap::new(),
-            root,
+            root: root.to_path_buf(),
         })
     }
+}
+
+fn default_adapters(root: &Path) -> AdapterConfigs {
+    AdapterConfigs {
+        criterion: Some(CriterionAdapterConfig {
+            input_root: root.join("target").join("criterion"),
+            csv_output: Some(
+                root.join("target")
+                    .join("criterion")
+                    .join("summarize_benchmarks.csv"),
+            ),
+            min_reasonable_mean_ns: 1.0,
+            max_reasonable_mean_ns: 1e12,
+        }),
+        stress: Some(StressAdapterConfig {
+            input_root: root.join("target").join("stress"),
+            csv_output: Some(root.join("target").join("stress").join("stress_summary.csv")),
+            min_reasonable_duration_ns: 3e9,
+            max_reasonable_throughput_ops_per_s: 1e9,
+            authoritative_min_samples: 5,
+        }),
+    }
+}
+
+const fn default_stability_thresholds() -> StabilityThresholds {
+    StabilityThresholds {
+        stable: 0.05,
+        acceptable: 0.10,
+        noisy: 0.20,
+    }
+}
+
+fn default_ignored_exact_ids() -> BTreeSet<String> {
+    string_set([
+        "hotpath_actor_messaging/actorref_clone_overhead",
+        "hotpath_context/timer_id_new",
+        "hotpath_envelope/messageid_new",
+        "hotpath_envelope/metadata_extraction",
+        "hotpath_envelope/is_expired_not_expired",
+        "hotpath_envelope/is_expired_expired",
+        "hotpath_envelope/is_expired_no_deadline",
+        "hotpath_routing/full_address_from_string",
+        "hotpath_routing/route_address_clone",
+        "hotpath_routing/route_address_family_access",
+        "hotpath_routing/route_address_route_access",
+        "hotpath_routing/route_as_str",
+        "hotpath_routing/route_clone_long",
+        "hotpath_routing/route_clone_short",
+        "hotpath_routing/route_equality_different",
+        "hotpath_routing/route_equality_same",
+        "hotpath_routing/route_family_from_u32",
+        "hotpath_routing/route_family_new_u64",
+    ])
+}
+
+fn default_sweep_config() -> Result<SweepConfig> {
+    Ok(SweepConfig {
+        tag_keys: string_set([
+            "client_count",
+            "subscriber_count",
+            "publisher_count",
+            "worker_count",
+            "pending_count",
+            "route_count",
+            "queue_count",
+            "area_count",
+            "family_count",
+            "payload_size",
+            "message_size",
+            "fanout_size",
+            "batch_size",
+            "list_size",
+            "depth",
+        ]),
+        tag_key_suffixes: string_vec(["_count", "_size", "_depth"]),
+        context_tag_keys: string_vec([
+            "measurement_scope",
+            "match_kind",
+            "ready_state",
+            "operation",
+            "layer",
+        ]),
+        name_patterns: vec![
+            sweep_pattern(
+                "concurrency",
+                r"(?P<prefix>scaling|concurrency|clients?)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern(
+                "subscriber_count",
+                r"(?P<prefix>subscribers?|subscriber_count)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern(
+                "payload_size",
+                r"(?P<prefix>payload|message|msg)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern(
+                "route_depth",
+                r"(?P<prefix>depth)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern(
+                "fanout_size",
+                r"(?P<prefix>fanout)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern(
+                "batch_size",
+                r"(?P<prefix>batch|batch_size)_(?P<value>\d+[a-zA-Z]*)",
+            )?,
+            sweep_pattern("list_size", r"(?P<prefix>list)_(?P<value>\d+[a-zA-Z]*)")?,
+        ],
+    })
+}
+
+fn sweep_pattern(parameter: &str, regex: &str) -> Result<SweepNamePatternConfig> {
+    Ok(SweepNamePatternConfig {
+        parameter: parameter.to_string(),
+        regex: Regex::new(regex)?,
+        value_capture: "value".to_string(),
+        prefix_capture: Some("prefix".to_string()),
+    })
+}
+
+fn string_set<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
+    values.into_iter().map(str::to_string).collect()
+}
+
+fn string_vec<const N: usize>(values: [&str; N]) -> Vec<String> {
+    values.into_iter().map(str::to_string).collect()
 }

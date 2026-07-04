@@ -57,3 +57,10 @@ cntryl-tools summarize-benchmarks
 ```
 
 `summarize-benchmarks` also accepts `--product-name` and `--report-title` if you want to override the default report branding.
+
+### Stress Reports
+
+`summarize-benchmarks` reads cntryl-stress v0.3 artifacts from `target/stress/**/latest.json`.
+Stress artifacts must use `schema_version: "cntryl-stress.v2"`.
+
+The stress adapter normalizes each v2 summary into the shared benchmark manifest, preserves structured parameters as report tags for sweep detection, and writes `target/stress/stress_summary.csv` alongside `target/bench_results.json` and `target/bench_summary.md`.

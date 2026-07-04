@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
 
@@ -51,8 +52,7 @@ pub fn write_adapter_csv(path: &Path, records: &[BenchmarkRecord]) -> Result<()>
             &format_optional_number(record.upper_bound),
             &record
                 .samples
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "NA".to_string()),
+                .map_or_else(|| "NA".to_string(), |value| value.to_string()),
             metric_direction_label(record.metric_direction),
             record.stability.as_deref().unwrap_or("NA"),
             record.status.as_deref().unwrap_or("NA"),
@@ -80,37 +80,44 @@ pub fn write_markdown_report(
     }
 
     let mut content = String::new();
-    content.push_str(&format!("# {}\n\n", config.report_title));
-    content.push_str(&format!("- product: {}\n", config.product_name));
-    content.push_str(&format!("- generated_at: {}\n", manifest.generated_at));
-    content.push_str(&format!(
-        "- commit: {}\n",
+    let _ = writeln!(content, "# {}", config.report_title);
+    let _ = writeln!(content);
+    let _ = writeln!(content, "- product: {}", config.product_name);
+    let _ = writeln!(content, "- generated_at: {}", manifest.generated_at);
+    let _ = writeln!(
+        content,
+        "- commit: {}",
         manifest.commit_hash.as_deref().unwrap_or("unknown")
-    ));
-    content.push_str(&format!(
-        "- baseline_available: {}\n",
+    );
+    let _ = writeln!(
+        content,
+        "- baseline_available: {}",
         manifest.comparison_summary.baseline_available
-    ));
-    content.push_str(&format!("- record_count: {}\n", manifest.records.len()));
-    content.push_str(&format!(
-        "- manifest: {}\n",
+    );
+    let _ = writeln!(content, "- record_count: {}", manifest.records.len());
+    let _ = writeln!(
+        content,
+        "- manifest: {}",
         display_relative(&config.root, &config.manifest_file)
-    ));
-    content.push_str(&format!(
-        "- baseline: {}\n",
+    );
+    let _ = writeln!(
+        content,
+        "- baseline: {}",
         display_relative(&config.root, &config.baseline_file)
-    ));
+    );
     if let Some(path) = config.criterion_csv_output() {
-        content.push_str(&format!(
-            "- criterion_csv: {}\n",
+        let _ = writeln!(
+            content,
+            "- criterion_csv: {}",
             display_relative(&config.root, path)
-        ));
+        );
     }
     if let Some(path) = config.stress_csv_output() {
-        content.push_str(&format!(
-            "- stress_csv: {}\n",
+        let _ = writeln!(
+            content,
+            "- stress_csv: {}",
             display_relative(&config.root, path)
-        ));
+        );
     }
     content.push('\n');
 
@@ -184,9 +191,11 @@ fn write_current_results_section(
     }
 
     for (adapter, suites) in grouped {
-        content.push_str(&format!("### {}\n\n", adapter));
+        let _ = writeln!(content, "### {adapter}");
+        let _ = writeln!(content);
         for (suite, suite_records) in suites {
-            content.push_str(&format!("#### {}\n\n", config.display_suite_label(&suite)));
+            let _ = writeln!(content, "#### {}", config.display_suite_label(&suite));
+            let _ = writeln!(content);
             write_table(
                 content,
                 &[
@@ -211,8 +220,7 @@ fn write_current_results_section(
                             record.unit.clone(),
                             record
                                 .samples
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "NA".to_string()),
+                                .map_or_else(|| "NA".to_string(), |value| value.to_string()),
                             format_rel_stddev(record.rel_stddev),
                             record.stability.clone().unwrap_or_else(|| "NA".to_string()),
                             record.status.clone().unwrap_or_else(|| "NA".to_string()),
@@ -246,13 +254,13 @@ fn write_delta_section(
     for delta in &comparison.deltas {
         let adapter = lookup
             .get(delta.id.as_str())
-            .map(|record| record.adapter.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+            .map_or_else(|| "unknown".to_string(), |record| record.adapter.clone());
         grouped.entry(adapter).or_default().push(delta);
     }
 
     for (adapter, deltas) in grouped {
-        content.push_str(&format!("### {}\n\n", adapter));
+        let _ = writeln!(content, "### {adapter}");
+        let _ = writeln!(content);
         write_table(
             content,
             &[
@@ -273,7 +281,7 @@ fn write_delta_section(
                 .iter()
                 .map(|delta| {
                     let record = lookup.get(delta.id.as_str()).copied();
-                    let unit = record.map(|value| value.unit.as_str()).unwrap_or("value");
+                    let unit = record.map_or("value", |value| value.unit.as_str());
                     vec![
                         delta.suite.clone(),
                         delta.case.clone(),
@@ -281,10 +289,10 @@ fn write_delta_section(
                             .and_then(|value| value.scenario.clone())
                             .unwrap_or_else(|| "NA".to_string()),
                         delta.metric.clone(),
-                        delta
-                            .baseline_value
-                            .map(|value| format_measurement(value, unit))
-                            .unwrap_or_else(|| "NA".to_string()),
+                        delta.baseline_value.map_or_else(
+                            || "NA".to_string(),
+                            |value| format_measurement(value, unit),
+                        ),
                         format_measurement(delta.current_value, unit),
                         format_delta(delta.delta_pct),
                         format_delta(delta.directional_delta_pct),
@@ -369,8 +377,10 @@ fn write_sweep_section(content: &mut String, sweeps: &[SweepGroup]) {
     }
 
     for group in sweeps {
-        content.push_str(&format!("### {}\n\n", group.title));
-        content.push_str(&format!("- metric: {} ({})\n\n", group.metric, group.unit));
+        let _ = writeln!(content, "### {}", group.title);
+        let _ = writeln!(content);
+        let _ = writeln!(content, "- metric: {} ({})", group.metric, group.unit);
+        let _ = writeln!(content);
         write_table(
             content,
             &[
@@ -391,8 +401,7 @@ fn write_sweep_section(content: &mut String, sweeps: &[SweepGroup]) {
                         format_delta(point.delta_vs_previous_pct),
                         point
                             .samples
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "NA".to_string()),
+                            .map_or_else(|| "NA".to_string(), |value| value.to_string()),
                         format_rel_stddev(point.rel_stddev),
                         point.status.clone().unwrap_or_else(|| "NA".to_string()),
                     ]
@@ -405,7 +414,7 @@ fn write_sweep_section(content: &mut String, sweeps: &[SweepGroup]) {
 fn write_notes_section(content: &mut String, notes: &[String]) {
     content.push_str("## Measurement Notes\n\n");
     for note in notes {
-        content.push_str(&format!("- {note}\n"));
+        let _ = writeln!(content, "- {note}");
     }
     content.push('\n');
 }
@@ -444,9 +453,8 @@ fn display_relative(root: &Path, path: &Path) -> String {
 
 fn format_measurement(value: f64, unit: &str) -> String {
     match unit {
-        "ns" => format!("{value:.0}"),
+        "ns" | "ops/s" => format!("{value:.0}"),
         "us" | "ms" => format!("{value:.3}"),
-        "ops/s" => format!("{value:.0}"),
         _ => format_number(value),
     }
 }
@@ -456,13 +464,14 @@ fn format_number(value: f64) -> String {
 }
 
 fn format_optional_number(value: Option<f64>) -> String {
-    value.map(format_number).unwrap_or_else(|| "NA".to_string())
+    value.map_or_else(|| "NA".to_string(), format_number)
 }
 
 fn format_rel_stddev(value: Option<f64>) -> String {
-    value
-        .map(|value| format!("{:.1}%", value * 100.0))
-        .unwrap_or_else(|| "NA".to_string())
+    value.map_or_else(
+        || "NA".to_string(),
+        |value| format!("{:.1}%", value * 100.0),
+    )
 }
 
 fn format_delta(value: Option<f64>) -> String {

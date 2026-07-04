@@ -1,15 +1,18 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
 use super::super::classify::classify_stability;
-use super::super::config::BenchSummaryConfig;
+use super::super::config::{BenchSummaryConfig, StressAdapterConfig};
 use super::super::model::{BenchmarkRecord, MetricDirection};
 use super::BenchmarkAdapter;
+
+const STRESS_SCHEMA_VERSION: &str = "cntryl-stress.v2";
 
 pub struct StressAdapter;
 
@@ -27,212 +30,628 @@ impl BenchmarkAdapter for StressAdapter {
         }
 
         let mut records = Vec::new();
-        for path in WalkDir::new(&adapter_config.input_root)
-            .into_iter()
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.into_path())
-            .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("latest.json"))
-        {
+        for path in latest_json_files(&adapter_config.input_root) {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let suite_file: StressSuiteFile = serde_json::from_str(&text)
+            let run_file: StressRunFile = serde_json::from_str(&text)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
-
-            let suite = suite_file.suite.unwrap_or_else(|| {
-                path.parent()
-                    .and_then(|value| value.file_name())
-                    .map(|value| value.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            });
-
-            for result in suite_file.results.unwrap_or_default() {
-                let name = result.name.unwrap_or_default();
-                let tags = result.tags.unwrap_or_default();
-                let scenario = tags.get("scenario").cloned();
-                let Some(elements) = result
-                    .elements
-                    .filter(|value| value.is_finite() && *value > 0.0)
-                else {
-                    continue;
-                };
-
-                let mut run_values: Vec<f64> = result
-                    .all_runs
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|value| value.is_finite() && *value > 0.0)
-                    .collect();
-                if run_values.is_empty() {
-                    if let Some(duration) = result
-                        .duration
-                        .filter(|value| value.is_finite() && *value > 0.0)
-                    {
-                        run_values.push(duration);
-                    }
-                }
-                if run_values.is_empty() {
-                    continue;
-                }
-
-                let median_duration_ns = median(&run_values);
-                if median_duration_ns <= 0.0 {
-                    continue;
-                }
-
-                let throughput_ops_per_s = elements / median_duration_ns * 1e9;
-                if !throughput_ops_per_s.is_finite()
-                    || throughput_ops_per_s > adapter_config.max_reasonable_throughput_ops_per_s
-                {
-                    continue;
-                }
-
-                let mean_run_ns = mean(&run_values);
-                let stddev_runs = stddev_population(&run_values, mean_run_ns);
-                let rel_stddev = if mean_run_ns > 0.0 {
-                    Some(stddev_runs / mean_run_ns)
-                } else {
-                    Some(0.0)
-                };
-                let stability = classify_stability(rel_stddev, &config.stability_thresholds);
-                let meets_runtime_floor =
-                    median_duration_ns >= adapter_config.min_reasonable_duration_ns;
-                let status = if run_values.len() < adapter_config.authoritative_min_runs {
-                    "insufficient_data".to_string()
-                } else if !meets_runtime_floor {
-                    "invalid_for_throughput".to_string()
-                } else {
-                    "authoritative".to_string()
-                };
-                let case = stress_case_name(&name);
-                let scenario_key = scenario.clone().unwrap_or_else(|| "unknown".to_string());
-
-                let min_throughput = run_values
-                    .iter()
-                    .copied()
-                    .map(|run| elements / run * 1e9)
-                    .reduce(f64::min);
-                let max_throughput = run_values
-                    .iter()
-                    .copied()
-                    .map(|run| elements / run * 1e9)
-                    .reduce(f64::max);
-                let per_op_ns = median_duration_ns / elements;
-
-                let mut metadata = BTreeMap::new();
-                metadata.insert("name".to_string(), name.clone());
-                metadata.insert("batch_size".to_string(), elements.to_string());
-                metadata.insert(
-                    "median_duration_ns".to_string(),
-                    median_duration_ns.to_string(),
-                );
-                metadata.insert("per_op_ns".to_string(), per_op_ns.to_string());
-                metadata.insert("per_op_us".to_string(), (per_op_ns / 1e3).to_string());
-                metadata.insert(
-                    "meets_runtime_floor".to_string(),
-                    meets_runtime_floor.to_string(),
-                );
-                metadata.insert(
-                    "min_run_ns".to_string(),
-                    run_values
-                        .iter()
-                        .copied()
-                        .fold(f64::INFINITY, f64::min)
-                        .to_string(),
-                );
-                metadata.insert(
-                    "max_run_ns".to_string(),
-                    run_values
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max)
-                        .to_string(),
-                );
-
-                records.push(BenchmarkRecord {
-                    id: format!("{}|{}|{}", suite, name, scenario_key),
-                    adapter: self.name().to_string(),
-                    suite: suite.clone(),
-                    case,
-                    scenario,
-                    metric: "throughput_ops_per_s".to_string(),
-                    unit: "ops/s".to_string(),
-                    value: throughput_ops_per_s,
-                    lower_bound: min_throughput,
-                    upper_bound: max_throughput,
-                    samples: Some(run_values.len()),
-                    metric_direction: MetricDirection::HigherIsBetter,
-                    stability: Some(stability),
-                    status: Some(status),
-                    rel_stddev,
-                    tags,
-                    metadata,
-                    source_file: path.display().to_string(),
-                });
-            }
+            records.extend(records_from_stress_run(
+                &run_file,
+                &path,
+                config,
+                adapter_config,
+            )?);
         }
 
         Ok(records)
     }
 }
 
+fn latest_json_files(root: &Path) -> impl Iterator<Item = std::path::PathBuf> + '_ {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("latest.json"))
+}
+
+fn records_from_stress_run(
+    run_file: &StressRunFile,
+    path: &Path,
+    config: &BenchSummaryConfig,
+    adapter_config: &StressAdapterConfig,
+) -> Result<Vec<BenchmarkRecord>> {
+    if run_file.schema_version != STRESS_SCHEMA_VERSION {
+        bail!(
+            "unsupported stress schema '{}' in {}; expected {STRESS_SCHEMA_VERSION}",
+            run_file.schema_version,
+            path.display()
+        );
+    }
+
+    let elapsed_by_benchmark = measured_elapsed_by_benchmark(&run_file.samples);
+    run_file
+        .summaries
+        .iter()
+        .filter_map(|summary| {
+            record_from_summary(
+                run_file,
+                summary,
+                elapsed_by_benchmark.get(&summary.benchmark_id).copied(),
+                path,
+                config,
+                adapter_config,
+            )
+            .transpose()
+        })
+        .collect()
+}
+
+fn record_from_summary(
+    run_file: &StressRunFile,
+    summary: &StressSummary,
+    median_elapsed_ns: Option<f64>,
+    path: &Path,
+    config: &BenchSummaryConfig,
+    adapter_config: &StressAdapterConfig,
+) -> Result<Option<BenchmarkRecord>> {
+    let Some(stats) = summary.stats.as_ref() else {
+        return Ok(None);
+    };
+    let metric = metric_spec(&summary.primary_metric)?;
+    let Some(value) = primary_value(metric.primary_metric, stats) else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return Ok(None);
+    }
+    if metric.primary_metric == StressPrimaryMetric::Throughput
+        && value > adapter_config.max_reasonable_throughput_ops_per_s
+    {
+        return Ok(None);
+    }
+
+    let scenario = summary
+        .parameters
+        .get("scenario")
+        .or_else(|| summary.metadata.get("scenario"))
+        .cloned();
+    let tags = summary.parameters.clone();
+    let mut metadata = summary_metadata(run_file, summary, stats, median_elapsed_ns);
+    metadata.insert(
+        "meets_sample_floor".to_string(),
+        (summary.measured_samples >= adapter_config.authoritative_min_samples).to_string(),
+    );
+    if let Some(median_elapsed_ns) = median_elapsed_ns {
+        metadata.insert(
+            "meets_runtime_floor".to_string(),
+            (median_elapsed_ns >= adapter_config.min_reasonable_duration_ns).to_string(),
+        );
+    }
+    for (key, value) in &summary.metadata {
+        metadata.insert(format!("stress_metadata_{key}"), value.clone());
+    }
+
+    Ok(Some(BenchmarkRecord {
+        id: record_id(summary, metric.name, scenario.as_deref()),
+        adapter: "stress".to_string(),
+        suite: run_file.suite.clone(),
+        case: stress_case_name(&summary.name),
+        scenario,
+        metric: metric.name.to_string(),
+        unit: metric.unit.to_string(),
+        value,
+        lower_bound: Some(stats.min),
+        upper_bound: Some(stats.max),
+        samples: Some(summary.measured_samples),
+        metric_direction: metric.direction,
+        stability: Some(classify_stability(
+            Some(stats.relative_std_dev),
+            &config.stability_thresholds,
+        )),
+        status: Some(summary_status(summary)),
+        rel_stddev: Some(stats.relative_std_dev),
+        tags,
+        metadata,
+        source_file: path.display().to_string(),
+    }))
+}
+
+fn summary_status(summary: &StressSummary) -> String {
+    if summary.correctness.passed {
+        summary.quality.clone()
+    } else {
+        "correctness_failed".to_string()
+    }
+}
+
+fn summary_metadata(
+    run_file: &StressRunFile,
+    summary: &StressSummary,
+    stats: &StressStats,
+    median_elapsed_ns: Option<f64>,
+) -> BTreeMap<String, String> {
+    let mut metadata = BTreeMap::from([
+        ("benchmark_id".to_string(), summary.benchmark_id.clone()),
+        ("name".to_string(), summary.name.clone()),
+        ("tier".to_string(), summary.tier.to_string()),
+        ("primary_metric".to_string(), summary.primary_metric.clone()),
+        ("quality".to_string(), summary.quality.clone()),
+        ("run_profile".to_string(), run_file.run_profile.clone()),
+        (
+            "measured_samples".to_string(),
+            summary.measured_samples.to_string(),
+        ),
+        (
+            "warmup_samples".to_string(),
+            summary.warmup_samples.to_string(),
+        ),
+        (
+            "cooldown_samples".to_string(),
+            summary.cooldown_samples.to_string(),
+        ),
+        (
+            "correctness_passed".to_string(),
+            summary.correctness.passed.to_string(),
+        ),
+        (
+            "correctness_errors".to_string(),
+            summary.correctness.errors.join(","),
+        ),
+        ("stats_mean".to_string(), stats.mean.to_string()),
+        ("stats_median".to_string(), stats.median.to_string()),
+        ("stats_min".to_string(), stats.min.to_string()),
+        ("stats_max".to_string(), stats.max.to_string()),
+        ("stats_std_dev".to_string(), stats.std_dev.to_string()),
+        (
+            "stats_relative_std_dev".to_string(),
+            stats.relative_std_dev.to_string(),
+        ),
+        (
+            "ci95_lower".to_string(),
+            stats.confidence_interval_95.lower.to_string(),
+        ),
+        (
+            "ci95_upper".to_string(),
+            stats.confidence_interval_95.upper.to_string(),
+        ),
+        ("p50".to_string(), stats.p50.to_string()),
+        ("p95".to_string(), stats.p95.to_string()),
+        ("p99".to_string(), stats.p99.to_string()),
+    ]);
+    if let Some(median_elapsed_ns) = median_elapsed_ns {
+        metadata.insert(
+            "median_sample_elapsed_ns".to_string(),
+            median_elapsed_ns.to_string(),
+        );
+    }
+    metadata.extend(summary.correctness.counters.to_metadata());
+    metadata
+}
+
+fn record_id(summary: &StressSummary, metric: &str, scenario: Option<&str>) -> String {
+    let mut parts = vec![summary.benchmark_id.clone(), metric.to_string()];
+    if let Some(scenario) = scenario {
+        parts.push(format!("scenario={scenario}"));
+    }
+    parts.extend(
+        summary
+            .parameters
+            .iter()
+            .filter(|(key, _)| key.as_str() != "scenario")
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    parts.join("|")
+}
+
+fn measured_elapsed_by_benchmark(samples: &[StressSample]) -> BTreeMap<String, f64> {
+    let mut grouped = BTreeMap::<String, Vec<f64>>::new();
+    for sample in samples
+        .iter()
+        .filter(|sample| sample.phase == StressSamplePhase::Measured)
+    {
+        grouped
+            .entry(sample.benchmark_id.clone())
+            .or_default()
+            .push(sample.elapsed_ns);
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(benchmark_id, values)| median(&values).map(|value| (benchmark_id, value)))
+        .collect()
+}
+
 fn stress_case_name(name: &str) -> String {
     name.split("::").last().unwrap_or(name).to_string()
 }
 
-fn median(values: &[f64]) -> f64 {
-    let mut ordered = values.to_vec();
-    ordered.sort_by(compare_f64);
-    if ordered.is_empty() {
-        return 0.0;
+fn median(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
     }
+    let mut ordered = values.to_vec();
+    ordered.sort_by(|left, right| compare_f64(*left, *right));
     let mid = ordered.len() / 2;
-    if ordered.len().is_multiple_of(2) {
-        (ordered[mid - 1] + ordered[mid]) / 2.0
+    Some(if ordered.len().is_multiple_of(2) {
+        f64::midpoint(ordered[mid - 1], ordered[mid])
     } else {
         ordered[mid]
+    })
+}
+
+fn compare_f64(left: f64, right: f64) -> Ordering {
+    left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+}
+
+fn metric_spec(primary_metric: &str) -> Result<StressMetricSpec> {
+    match primary_metric {
+        "throughput" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::Throughput,
+            name: "throughput_ops_per_s",
+            unit: "ops/s",
+            direction: MetricDirection::HigherIsBetter,
+        }),
+        "latency_p95" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::LatencyP95,
+            name: "latency_p95_ns",
+            unit: "ns",
+            direction: MetricDirection::LowerIsBetter,
+        }),
+        "elapsed_per_operation" => Ok(StressMetricSpec {
+            primary_metric: StressPrimaryMetric::ElapsedPerOperation,
+            name: "elapsed_per_operation_ns",
+            unit: "ns",
+            direction: MetricDirection::LowerIsBetter,
+        }),
+        other => bail!("unknown stress primary metric '{other}'"),
     }
 }
 
-fn mean(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        0.0
-    } else {
-        values.iter().sum::<f64>() / values.len() as f64
-    }
+fn primary_value(metric: StressPrimaryMetric, stats: &StressStats) -> Option<f64> {
+    let value = match metric {
+        StressPrimaryMetric::Throughput | StressPrimaryMetric::ElapsedPerOperation => stats.mean,
+        StressPrimaryMetric::LatencyP95 => stats.p95,
+    };
+    value.is_finite().then_some(value)
 }
 
-fn stddev_population(values: &[f64], mean_value: f64) -> f64 {
-    if values.len() <= 1 {
-        return 0.0;
-    }
-
-    let variance = values
-        .iter()
-        .map(|value| {
-            let delta = value - mean_value;
-            delta * delta
-        })
-        .sum::<f64>()
-        / values.len() as f64;
-    variance.sqrt()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StressPrimaryMetric {
+    Throughput,
+    LatencyP95,
+    ElapsedPerOperation,
 }
 
-fn compare_f64(left: &f64, right: &f64) -> Ordering {
-    left.partial_cmp(right).unwrap_or(Ordering::Equal)
+#[derive(Debug, Clone, Copy)]
+struct StressMetricSpec {
+    primary_metric: StressPrimaryMetric,
+    name: &'static str,
+    unit: &'static str,
+    direction: MetricDirection,
 }
 
 #[derive(Debug, Deserialize)]
-struct StressSuiteFile {
-    suite: Option<String>,
-    results: Option<Vec<StressResultFile>>,
+struct StressRunFile {
+    schema_version: String,
+    suite: String,
+    run_profile: String,
+    #[serde(default)]
+    summaries: Vec<StressSummary>,
+    #[serde(default)]
+    samples: Vec<StressSample>,
 }
 
 #[derive(Debug, Deserialize)]
-struct StressResultFile {
-    name: Option<String>,
-    duration: Option<f64>,
-    elements: Option<f64>,
-    all_runs: Option<Vec<f64>>,
-    tags: Option<BTreeMap<String, String>>,
+struct StressSummary {
+    benchmark_id: String,
+    name: String,
+    tier: u32,
+    primary_metric: String,
+    measured_samples: usize,
+    warmup_samples: usize,
+    cooldown_samples: usize,
+    stats: Option<StressStats>,
+    quality: String,
+    correctness: StressCorrectness,
+    #[serde(default)]
+    parameters: BTreeMap<String, String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StressStats {
+    mean: f64,
+    median: f64,
+    min: f64,
+    max: f64,
+    std_dev: f64,
+    relative_std_dev: f64,
+    confidence_interval_95: StressConfidenceInterval,
+    p50: f64,
+    p95: f64,
+    p99: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StressConfidenceInterval {
+    lower: f64,
+    upper: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StressCorrectness {
+    passed: bool,
+    #[serde(default)]
+    counters: StressCorrectnessCounters,
+    #[serde(default)]
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StressCorrectnessCounters {
+    attempted: u64,
+    completed: u64,
+    failures: u64,
+    timeouts: u64,
+    duplicates: u64,
+    dropped: u64,
+    validation_errors: u64,
+}
+
+impl StressCorrectnessCounters {
+    fn to_metadata(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "correctness_attempted".to_string(),
+                self.attempted.to_string(),
+            ),
+            (
+                "correctness_completed".to_string(),
+                self.completed.to_string(),
+            ),
+            (
+                "correctness_failures".to_string(),
+                self.failures.to_string(),
+            ),
+            (
+                "correctness_timeouts".to_string(),
+                self.timeouts.to_string(),
+            ),
+            (
+                "correctness_duplicates".to_string(),
+                self.duplicates.to_string(),
+            ),
+            ("correctness_dropped".to_string(), self.dropped.to_string()),
+            (
+                "correctness_validation_errors".to_string(),
+                self.validation_errors.to_string(),
+            ),
+        ])
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StressSample {
+    benchmark_id: String,
+    phase: StressSamplePhase,
+    elapsed_ns: f64,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StressSamplePhase {
+    Warmup,
+    Measured,
+    Cooldown,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn config() -> BenchSummaryConfig {
+        BenchSummaryConfig::for_tests()
+    }
+
+    fn adapter_config(config: &BenchSummaryConfig) -> &StressAdapterConfig {
+        config.adapters.stress.as_ref().expect("stress config")
+    }
+
+    fn parse_run(json: &str) -> StressRunFile {
+        serde_json::from_str(json).expect("valid stress run")
+    }
+
+    #[test]
+    fn should_collect_v2_throughput_summary() {
+        let config = config();
+        let run = parse_run(
+            r#"{
+                "schema_version": "cntryl-stress.v2",
+                "suite": "tier4_queue",
+                "run_profile": "release",
+                "samples": [
+                    {"benchmark_id": "tier4_queue/queue::fanout", "phase": "warmup", "elapsed_ns": 1000000000},
+                    {"benchmark_id": "tier4_queue/queue::fanout", "phase": "measured", "elapsed_ns": 3000000000},
+                    {"benchmark_id": "tier4_queue/queue::fanout", "phase": "measured", "elapsed_ns": 5000000000}
+                ],
+                "summaries": [{
+                    "benchmark_id": "tier4_queue/queue::fanout",
+                    "name": "queue::fanout",
+                    "tier": 4,
+                    "primary_metric": "throughput",
+                    "measured_samples": 10,
+                    "warmup_samples": 1,
+                    "cooldown_samples": 0,
+                    "stats": {
+                        "mean": 1000.0,
+                        "median": 995.0,
+                        "min": 900.0,
+                        "max": 1100.0,
+                        "std_dev": 40.0,
+                        "relative_std_dev": 0.04,
+                        "confidence_interval_95": {"lower": 975.0, "upper": 1025.0},
+                        "p50": 995.0,
+                        "p95": 1080.0,
+                        "p99": 1095.0
+                    },
+                    "quality": "authoritative",
+                    "correctness": {
+                        "passed": true,
+                        "counters": {
+                            "attempted": 1000,
+                            "completed": 1000,
+                            "failures": 0,
+                            "timeouts": 0,
+                            "duplicates": 0,
+                            "dropped": 0,
+                            "validation_errors": 0
+                        },
+                        "errors": []
+                    },
+                    "parameters": {
+                        "scenario": "fanout",
+                        "client_count": "16",
+                        "transport": "tcp"
+                    },
+                    "metadata": {
+                        "operation": "enqueue"
+                    }
+                }]
+            }"#,
+        );
+
+        let records = records_from_stress_run(
+            &run,
+            &PathBuf::from("target/stress/tier4_queue/latest.json"),
+            &config,
+            adapter_config(&config),
+        )
+        .expect("records");
+
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.id, "tier4_queue/queue::fanout|throughput_ops_per_s|scenario=fanout|client_count=16|transport=tcp");
+        assert_eq!(record.suite, "tier4_queue");
+        assert_eq!(record.case, "fanout");
+        assert_eq!(record.scenario, Some("fanout".to_string()));
+        assert_eq!(record.metric, "throughput_ops_per_s");
+        assert_eq!(record.unit, "ops/s");
+        assert_eq!(record.metric_direction, MetricDirection::HigherIsBetter);
+        assert_close(record.value, 1000.0);
+        assert_optional_close(record.lower_bound, 900.0);
+        assert_optional_close(record.upper_bound, 1100.0);
+        assert_eq!(record.samples, Some(10));
+        assert_eq!(record.status, Some("authoritative".to_string()));
+        assert_eq!(record.stability, Some("stable".to_string()));
+        assert_eq!(record.tags.get("client_count"), Some(&"16".to_string()));
+        assert_eq!(
+            record.metadata.get("median_sample_elapsed_ns"),
+            Some(&"4000000000".to_string())
+        );
+        assert_eq!(
+            record.metadata.get("stress_metadata_operation"),
+            Some(&"enqueue".to_string())
+        );
+    }
+
+    #[test]
+    fn should_map_latency_p95_as_lower_is_better() {
+        let config = config();
+        let run = parse_run(
+            r#"{
+                "schema_version": "cntryl-stress.v2",
+                "suite": "tier3_rpc",
+                "run_profile": "release",
+                "samples": [],
+                "summaries": [{
+                    "benchmark_id": "tier3_rpc/rpc::round_trip",
+                    "name": "rpc::round_trip",
+                    "tier": 3,
+                    "primary_metric": "latency_p95",
+                    "measured_samples": 10,
+                    "warmup_samples": 1,
+                    "cooldown_samples": 0,
+                    "stats": {
+                        "mean": 100.0,
+                        "median": 95.0,
+                        "min": 80.0,
+                        "max": 180.0,
+                        "std_dev": 5.0,
+                        "relative_std_dev": 0.05,
+                        "confidence_interval_95": {"lower": 95.0, "upper": 105.0},
+                        "p50": 95.0,
+                        "p95": 160.0,
+                        "p99": 180.0
+                    },
+                    "quality": "acceptable",
+                    "correctness": {
+                        "passed": true,
+                        "counters": {
+                            "attempted": 10,
+                            "completed": 10,
+                            "failures": 0,
+                            "timeouts": 0,
+                            "duplicates": 0,
+                            "dropped": 0,
+                            "validation_errors": 0
+                        },
+                        "errors": []
+                    }
+                }]
+            }"#,
+        );
+
+        let records = records_from_stress_run(
+            &run,
+            &PathBuf::from("target/stress/tier3_rpc/latest.json"),
+            &config,
+            adapter_config(&config),
+        )
+        .expect("records");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].metric, "latency_p95_ns");
+        assert_eq!(records[0].unit, "ns");
+        assert_eq!(records[0].metric_direction, MetricDirection::LowerIsBetter);
+        assert_close(records[0].value, 160.0);
+        assert_eq!(records[0].status, Some("acceptable".to_string()));
+    }
+
+    #[test]
+    fn should_reject_non_v2_stress_schema() {
+        let config = config();
+        let run = parse_run(
+            r#"{
+                "schema_version": "cntryl-stress.v1",
+                "suite": "old",
+                "run_profile": "smoke",
+                "summaries": [],
+                "samples": []
+            }"#,
+        );
+
+        let result = records_from_stress_run(
+            &run,
+            &PathBuf::from("target/stress/old/latest.json"),
+            &config,
+            adapter_config(&config),
+        );
+
+        assert!(result.is_err());
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < f64::EPSILON,
+            "expected {actual} to equal {expected}"
+        );
+    }
+
+    fn assert_optional_close(actual: Option<f64>, expected: f64) {
+        assert_close(actual.expect("value"), expected);
+    }
 }

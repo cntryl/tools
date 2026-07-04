@@ -40,7 +40,7 @@ fn main() {
     let cli = Cli::parse();
     let exit_code = match cli.command {
         Commands::ValidateTests(args) => validate_tests::run(args),
-        Commands::GenerateInventory(args) => generate_inventory::run(args),
+        Commands::GenerateInventory(args) => generate_inventory::run(&args),
         Commands::SummarizeBenchmarks(args) => summarize_benchmarks::run(args),
     }
     .unwrap_or_else(|error| {

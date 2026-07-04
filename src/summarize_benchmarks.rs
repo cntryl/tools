@@ -1,12 +1,11 @@
 use std::fs;
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use clap::Args;
 use chrono::Utc;
-use serde::Deserialize;
+use clap::Args;
 
 use crate::adapters::enabled_adapters;
 use crate::classify::{
@@ -14,7 +13,7 @@ use crate::classify::{
 };
 use crate::compare::compare_records;
 use crate::config::BenchSummaryConfig;
-use crate::model::{BenchmarkManifest, BenchmarkRecord, MetricDirection};
+use crate::model::{BenchmarkManifest, BenchmarkRecord, BENCHMARK_MANIFEST_SCHEMA_VERSION};
 use crate::report::{write_adapter_csv, write_markdown_report};
 use crate::sweep::detect_sweep_groups;
 
@@ -30,47 +29,47 @@ pub struct SummarizeBenchmarksArgs {
 
 pub fn run(args: SummarizeBenchmarksArgs) -> Result<i32> {
     let config = BenchSummaryConfig::for_root(args.root, args.product_name, args.report_title)?;
-    run_with_config(config)
+    run_with_config(&config)
 }
 
-fn run_with_config(config: BenchSummaryConfig) -> Result<i32> {
-    let mut records = collect_records(&config)?;
+fn run_with_config(config: &BenchSummaryConfig) -> Result<i32> {
+    let mut records = collect_records(config)?;
     records.retain(|record| !config.should_ignore_record(record));
     sort_records(&mut records);
 
-    write_adapter_csv_artifacts(&config, &records)?;
+    write_adapter_csv_artifacts(config, &records)?;
 
     let baseline = load_baseline_manifest(&config.baseline_file)?;
     let comparison = compare_records(&records, baseline.as_ref());
-    let notes = collect_measurement_notes(&records, &comparison, &config);
+    let notes = collect_measurement_notes(&records, &comparison, config);
     let summary = build_comparison_summary(
         &records,
         &comparison,
         baseline.is_some(),
         notes.len(),
-        &config,
+        config,
     );
     let manifest = BenchmarkManifest {
-        schema_version: config.schema_version,
+        schema_version: BENCHMARK_MANIFEST_SCHEMA_VERSION,
         generated_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         commit_hash: git_commit_hash(&config.root),
         comparison_summary: summary.clone(),
         records: records.clone(),
     };
-    let sweeps = detect_sweep_groups(&records, &config)?;
+    let sweeps = detect_sweep_groups(&records, config);
 
     write_json(&config.manifest_file, &manifest)?;
-    write_markdown_report(&config, &manifest, &comparison, &sweeps, &notes)?;
+    write_markdown_report(config, &manifest, &comparison, &sweeps, &notes)?;
 
     println!("Wrote {} (manifest).", config.manifest_file.display());
     println!("Wrote {} (report).", config.markdown_report_file.display());
 
-    if current_run_authoritative(&records, &config) && summary.critical == 0 {
+    if current_run_authoritative(&records, config) && summary.critical == 0 {
         write_json(&config.baseline_file, &manifest)?;
         println!("Promoted {} (baseline).", config.baseline_file.display());
     }
 
-    Ok(if summary.critical > 0 { 1 } else { 0 })
+    Ok(i32::from(summary.critical > 0))
 }
 
 fn collect_records(config: &BenchSummaryConfig) -> Result<Vec<BenchmarkRecord>> {
@@ -140,13 +139,18 @@ fn load_baseline_manifest(path: &Path) -> Result<Option<BenchmarkManifest>> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read baseline {}", path.display()))?;
 
-    if let Ok(manifest) = serde_json::from_str::<BenchmarkManifest>(&text) {
-        return Ok(Some(manifest));
+    let manifest: BenchmarkManifest = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse baseline {}", path.display()))?;
+    if manifest.schema_version != BENCHMARK_MANIFEST_SCHEMA_VERSION {
+        anyhow::bail!(
+            "unsupported baseline schema_version {} in {}; expected {}",
+            manifest.schema_version,
+            path.display(),
+            BENCHMARK_MANIFEST_SCHEMA_VERSION
+        );
     }
 
-    let legacy: LegacyBaselineManifest = serde_json::from_str(&text)
-        .with_context(|| format!("failed to parse baseline {}", path.display()))?;
-    Ok(Some(legacy.into_manifest()))
+    Ok(Some(manifest))
 }
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -180,195 +184,10 @@ fn git_commit_hash(root: &Path) -> Option<String> {
     }
 }
 
-fn infer_metric_unit(metric: &str) -> String {
-    if metric.ends_with("_ns") {
-        "ns".to_string()
-    } else if metric.ends_with("_us") {
-        "us".to_string()
-    } else if metric.ends_with("_ms") {
-        "ms".to_string()
-    } else if metric.contains("ops_per_s") {
-        "ops/s".to_string()
-    } else {
-        "value".to_string()
-    }
-}
-
-fn infer_metric_direction(metric: &str) -> MetricDirection {
-    if metric.contains("throughput") || metric.contains("ops_per_s") {
-        MetricDirection::HigherIsBetter
-    } else {
-        MetricDirection::LowerIsBetter
-    }
-}
-
-fn split_benchmark_path(path: &str) -> (String, String) {
-    let mut parts = path.split('/');
-    let suite = parts.next().unwrap_or("other").to_string();
-    let case = parts.collect::<Vec<_>>().join("/");
-    (
-        suite,
-        if case.is_empty() {
-            path.to_string()
-        } else {
-            case
-        },
-    )
-}
-
-fn stress_case_name(name: &str) -> String {
-    name.split("::").last().unwrap_or(name).to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyBaselineManifest {
-    schema_version: Option<u32>,
-    generated_at: Option<String>,
-    commit_hash: Option<String>,
-    #[serde(default)]
-    criterion: Vec<LegacyCriterionRecord>,
-    #[serde(default)]
-    stress: Vec<LegacyStressRecord>,
-}
-
-impl LegacyBaselineManifest {
-    fn into_manifest(self) -> BenchmarkManifest {
-        let mut records = Vec::with_capacity(self.criterion.len() + self.stress.len());
-
-        for record in self.criterion {
-            let (suite, case) = split_benchmark_path(&record.benchmark);
-            records.push(BenchmarkRecord {
-                id: record
-                    .comparison_key
-                    .clone()
-                    .unwrap_or_else(|| record.benchmark.clone()),
-                adapter: "criterion".to_string(),
-                suite,
-                case,
-                scenario: Some(record.scenario.clone()).filter(|value| !value.is_empty()),
-                metric: record.metric.clone(),
-                unit: infer_metric_unit(&record.metric),
-                value: record.median_value.or(record.median_ns).unwrap_or_default(),
-                lower_bound: record.min_value,
-                upper_bound: record.max_value,
-                samples: record.runs,
-                metric_direction: infer_metric_direction(&record.metric),
-                stability: Some(record.stability.clone()),
-                status: Some(record.status.clone()),
-                rel_stddev: record.rel_stddev,
-                tags: Default::default(),
-                metadata: Default::default(),
-                source_file: record.source_file,
-            });
-        }
-
-        for record in self.stress {
-            let mut tags = std::collections::BTreeMap::new();
-            if let Some(transport) = &record.transport {
-                tags.insert("transport".to_string(), transport.clone());
-            }
-
-            records.push(BenchmarkRecord {
-                id: record.comparison_key.clone().unwrap_or_else(|| {
-                    format!("{}|{}|{}", record.suite, record.name, record.scenario)
-                }),
-                adapter: "stress".to_string(),
-                suite: record.suite.clone(),
-                case: stress_case_name(&record.name),
-                scenario: Some(record.scenario.clone()).filter(|value| !value.is_empty()),
-                metric: record.metric.clone(),
-                unit: infer_metric_unit(&record.metric),
-                value: record
-                    .median_value
-                    .or(record.median_throughput_ops_per_s)
-                    .unwrap_or_default(),
-                lower_bound: record.min_value,
-                upper_bound: record.max_value,
-                samples: Some(record.runs),
-                metric_direction: infer_metric_direction(&record.metric),
-                stability: Some(record.stability.clone()),
-                status: Some(record.status.clone()),
-                rel_stddev: record.rel_stddev,
-                tags,
-                metadata: Default::default(),
-                source_file: record.source_file,
-            });
-        }
-
-        BenchmarkManifest {
-            schema_version: self.schema_version.unwrap_or(1),
-            generated_at: self.generated_at.unwrap_or_default(),
-            commit_hash: self.commit_hash,
-            comparison_summary: Default::default(),
-            records,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyCriterionRecord {
-    benchmark: String,
-    #[serde(default = "default_latency_metric")]
-    metric: String,
-    #[serde(default)]
-    scenario: String,
-    #[serde(default)]
-    median_value: Option<f64>,
-    #[serde(default)]
-    median_ns: Option<f64>,
-    #[serde(default)]
-    min_value: Option<f64>,
-    #[serde(default)]
-    max_value: Option<f64>,
-    stability: String,
-    status: String,
-    #[serde(default)]
-    runs: Option<usize>,
-    #[serde(default)]
-    rel_stddev: Option<f64>,
-    source_file: String,
-    #[serde(default)]
-    comparison_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyStressRecord {
-    suite: String,
-    name: String,
-    scenario: String,
-    #[serde(default = "default_throughput_metric")]
-    metric: String,
-    #[serde(default)]
-    median_value: Option<f64>,
-    #[serde(default)]
-    median_throughput_ops_per_s: Option<f64>,
-    #[serde(default)]
-    min_value: Option<f64>,
-    #[serde(default)]
-    max_value: Option<f64>,
-    stability: String,
-    status: String,
-    runs: usize,
-    #[serde(default)]
-    rel_stddev: Option<f64>,
-    source_file: String,
-    #[serde(default)]
-    comparison_key: Option<String>,
-    #[serde(default)]
-    transport: Option<String>,
-}
-
-fn default_latency_metric() -> String {
-    "latency_ns".to_string()
-}
-
-fn default_throughput_metric() -> String {
-    "throughput_ops_per_s".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MetricDirection;
     use std::collections::BTreeMap;
 
     fn record(id: &str) -> BenchmarkRecord {

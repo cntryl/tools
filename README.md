@@ -61,6 +61,6 @@ cntryl-tools summarize-benchmarks
 ### Stress Reports
 
 `summarize-benchmarks` reads cntryl-stress v0.3 artifacts from `target/stress/**/latest.json`.
-Stress artifacts must use `schema_version: "cntryl-stress.v1"`.
+Stress artifacts must use `schema_version: "cntryl-stress.v2"`.
 
 The stress adapter normalizes current summaries into the shared benchmark manifest, including `throughput_ops_per_s`, `latency_p95_ns`, `ns_per_op`, `allocs_per_op`, and `bytes_per_op` records when present. It preserves structured parameters as report tags for sweep detection and writes `target/stress/stress_summary.csv` alongside `target/bench_results.json` and `target/bench_summary.md`. Non-current stress schemas are rejected so stale artifacts cannot silently enter reports.

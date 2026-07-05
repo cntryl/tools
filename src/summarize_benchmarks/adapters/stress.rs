@@ -12,7 +12,7 @@ use super::super::config::{BenchSummaryConfig, StressAdapterConfig};
 use super::super::model::{BenchmarkRecord, MetricDirection};
 use super::BenchmarkAdapter;
 
-const STRESS_SCHEMA_VERSION: &str = "cntryl-stress.v1";
+const STRESS_SCHEMA_VERSION: &str = "cntryl-stress.v2";
 
 pub struct StressAdapter;
 
@@ -295,8 +295,27 @@ fn summary_metadata(
         ("p95".to_string(), stats.p95.to_string()),
         ("p99".to_string(), stats.p99.to_string()),
     ]);
-    if !summary.flags.is_empty() {
-        metadata.insert("flags".to_string(), summary.flags.join(","));
+    if !summary.diagnostics.is_empty() {
+        metadata.insert(
+            "diagnostics".to_string(),
+            summary
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let suggestions = summary
+            .diagnostics
+            .iter()
+            .flat_map(|diagnostic| diagnostic.suggestions.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        if !suggestions.is_empty() {
+            metadata.insert(
+                "diagnostic_suggestions".to_string(),
+                suggestions.join(" | "),
+            );
+        }
     }
     if let Some(overhead) = &summary.overhead_ns_per_op {
         metadata.insert(
@@ -460,7 +479,7 @@ struct StressSummary {
     quality: String,
     correctness: StressCorrectness,
     #[serde(default)]
-    flags: Vec<String>,
+    diagnostics: Vec<StressDiagnostic>,
     #[serde(default)]
     parameters: BTreeMap<String, String>,
     #[serde(default)]
@@ -479,6 +498,20 @@ struct StressStats {
     p50: f64,
     p95: f64,
     p99: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StressDiagnostic {
+    code: String,
+    #[allow(dead_code)]
+    severity: String,
+    #[allow(dead_code)]
+    reason: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    evidence: BTreeMap<String, String>,
+    #[serde(default)]
+    suggestions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -573,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_stress_artifact_without_v1_schema() {
+    fn should_reject_stress_artifact_without_v2_schema() {
         let result = parse_stress_run_file(
             r#"{"suite": "old", "results": []}"#,
             &PathBuf::from("target/stress/old/latest.json"),
@@ -583,9 +616,9 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_malformed_v1_stress_artifact() {
+    fn should_fail_malformed_v2_stress_artifact() {
         let result = parse_stress_run_file(
-            r#"{"schema_version": "cntryl-stress.v1"}"#,
+            r#"{"schema_version": "cntryl-stress.v2"}"#,
             &PathBuf::from("target/stress/bad/latest.json"),
         );
 
@@ -593,11 +626,11 @@ mod tests {
     }
 
     #[test]
-    fn should_collect_v1_throughput_summary() {
+    fn should_collect_v2_throughput_summary() {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v1",
+                "schema_version": "cntryl-stress.v2",
                 "suite": "tier4_queue",
                 "run_profile": "release",
                 "samples": [
@@ -687,11 +720,11 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn should_collect_v1_micro_and_allocation_records() {
+    fn should_collect_v2_micro_and_allocation_records() {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v1",
+                "schema_version": "cntryl-stress.v2",
                 "suite": "tier1_hot_path",
                 "run_profile": "release",
                 "samples": [
@@ -766,7 +799,13 @@ mod tests {
                         "p99": 0.0
                     },
                     "quality": "authoritative",
-                    "flags": ["validated_micro"],
+                    "diagnostics": [{
+                        "code": "suspicious_micro_timing",
+                        "severity": "warning",
+                        "reason": "Tier 1 timing is below 5 ns/op without explicit validation.",
+                        "evidence": {"mean_ns_per_op": "42"},
+                        "suggestions": ["Validate the microbenchmark independently."]
+                    }],
                     "correctness": {
                         "passed": true,
                         "counters": {
@@ -803,8 +842,12 @@ mod tests {
             Some(&"2".to_string())
         );
         assert_eq!(
-            records[0].metadata.get("flags"),
-            Some(&"validated_micro".to_string())
+            records[0].metadata.get("diagnostics"),
+            Some(&"suspicious_micro_timing".to_string())
+        );
+        assert_eq!(
+            records[0].metadata.get("diagnostic_suggestions"),
+            Some(&"Validate the microbenchmark independently.".to_string())
         );
         assert_eq!(records[1].metric, "allocs_per_op");
         assert_eq!(records[1].unit, "allocs/op");
@@ -817,7 +860,7 @@ mod tests {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v1",
+                "schema_version": "unsupported",
                 "suite": "tier3_rpc",
                 "run_profile": "release",
                 "samples": [],

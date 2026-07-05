@@ -218,11 +218,11 @@ fn record_from_stats(
         samples: Some(summary.measured_samples),
         metric_direction: metric.direction,
         stability: Some(classify_stability(
-            Some(stats.relative_std_dev),
+            stats.relative_std_dev,
             &context.config.stability_thresholds,
         )),
         status: Some(summary_status(summary)),
-        rel_stddev: Some(stats.relative_std_dev),
+        rel_stddev: stats.relative_std_dev,
         tags,
         metadata,
         source_file: context.path.display().to_string(),
@@ -279,7 +279,9 @@ fn summary_metadata(
         ("stats_std_dev".to_string(), stats.std_dev.to_string()),
         (
             "stats_relative_std_dev".to_string(),
-            stats.relative_std_dev.to_string(),
+            stats
+                .relative_std_dev
+                .map_or_else(|| "null".to_string(), |value| value.to_string()),
         ),
         (
             "ci95_lower".to_string(),
@@ -472,7 +474,7 @@ struct StressStats {
     min: f64,
     max: f64,
     std_dev: f64,
-    relative_std_dev: f64,
+    relative_std_dev: Option<f64>,
     confidence_interval_95: StressConfidenceInterval,
     p50: f64,
     p95: f64,

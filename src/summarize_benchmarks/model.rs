@@ -80,6 +80,7 @@ pub struct BenchmarkDelta {
     pub current_stability: Option<String>,
     pub baseline_status: Option<String>,
     pub current_status: Option<String>,
+    pub semantic_change: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -9,11 +9,13 @@ use clap::Args;
 
 use crate::adapters::enabled_adapters;
 use crate::classify::{
-    build_comparison_summary, collect_measurement_notes, current_run_authoritative,
+    authority_label, build_comparison_summary, collect_measurement_notes, current_run_authoritative,
 };
 use crate::compare::compare_records;
 use crate::config::BenchSummaryConfig;
-use crate::model::{BenchmarkManifest, BenchmarkRecord, BENCHMARK_MANIFEST_SCHEMA_VERSION};
+use crate::model::{
+    BenchmarkManifest, BenchmarkRecord, ComparisonSummary, BENCHMARK_MANIFEST_SCHEMA_VERSION,
+};
 use crate::report::{write_adapter_csv, write_markdown_report};
 use crate::sweep::detect_sweep_groups;
 
@@ -63,13 +65,38 @@ fn run_with_config(config: &BenchSummaryConfig) -> Result<i32> {
 
     println!("Wrote {} (manifest).", config.manifest_file.display());
     println!("Wrote {} (report).", config.markdown_report_file.display());
+    print_comparison_counters(&records, &summary, config);
 
-    if current_run_authoritative(&records, config) && summary.critical == 0 {
+    if current_run_authoritative(&records, config)
+        && summary.critical == 0
+        && summary.new == 0
+        && summary.missing == 0
+    {
         write_json(&config.baseline_file, &manifest)?;
         println!("Promoted {} (baseline).", config.baseline_file.display());
     }
 
-    Ok(i32::from(summary.critical > 0))
+    Ok(summary_exit_code(&summary))
+}
+
+fn print_comparison_counters(
+    records: &[BenchmarkRecord],
+    summary: &ComparisonSummary,
+    config: &BenchSummaryConfig,
+) {
+    println!(
+        "Comparison counters: critical={} new={} missing={} regressions={} improvements={} authority={}",
+        summary.critical,
+        summary.new,
+        summary.missing,
+        summary.regressions,
+        summary.improved,
+        authority_label(records, summary, config)
+    );
+}
+
+fn summary_exit_code(summary: &ComparisonSummary) -> i32 {
+    i32::from(summary.critical > 0 || summary.new > 0 || summary.missing > 0)
 }
 
 fn collect_records(config: &BenchSummaryConfig) -> Result<Vec<BenchmarkRecord>> {
@@ -242,5 +269,27 @@ mod tests {
 
         // Assert
         assert!(ignored);
+    }
+
+    #[test]
+    fn should_exit_nonzero_for_critical_new_or_missing_records() {
+        for summary in [
+            ComparisonSummary {
+                critical: 1,
+                ..ComparisonSummary::default()
+            },
+            ComparisonSummary {
+                new: 1,
+                ..ComparisonSummary::default()
+            },
+            ComparisonSummary {
+                missing: 1,
+                ..ComparisonSummary::default()
+            },
+        ] {
+            assert_eq!(summary_exit_code(&summary), 1);
+        }
+
+        assert_eq!(summary_exit_code(&ComparisonSummary::default()), 0);
     }
 }

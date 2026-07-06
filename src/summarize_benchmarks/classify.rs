@@ -20,6 +20,23 @@ pub fn current_run_authoritative(records: &[BenchmarkRecord], config: &BenchSumm
         })
 }
 
+pub fn authority_label(
+    records: &[BenchmarkRecord],
+    summary: &ComparisonSummary,
+    config: &BenchSummaryConfig,
+) -> &'static str {
+    if records.is_empty() {
+        return "not trustworthy enough for authority";
+    }
+    if default_profile_accepted(records, config) {
+        return "accepted default profile, not lab-authoritative";
+    }
+    if summary.authoritative {
+        return "lab-authoritative";
+    }
+    "not trustworthy enough for authority"
+}
+
 pub fn build_comparison_summary(
     records: &[BenchmarkRecord],
     comparison: &ComparisonOutcome,
@@ -158,6 +175,8 @@ pub fn collect_measurement_notes(
         ));
     }
 
+    push_semantic_change_notes(&mut notes, comparison);
+
     if !comparison.new_records.is_empty() {
         notes.push(format!(
             "{} current record(s) do not have baseline coverage.",
@@ -170,6 +189,7 @@ pub fn collect_measurement_notes(
             comparison.missing_records.len()
         ));
     }
+    push_probable_rename_notes(&mut notes, comparison);
 
     if notes.is_empty() {
         notes.push("No major measurement warnings detected in current data.".to_string());
@@ -178,12 +198,56 @@ pub fn collect_measurement_notes(
     notes
 }
 
+fn push_semantic_change_notes(notes: &mut Vec<String>, comparison: &ComparisonOutcome) {
+    for delta in comparison
+        .deltas
+        .iter()
+        .filter(|delta| delta.semantic_change.is_some())
+        .take(8)
+    {
+        notes.push(format!(
+            "{} / {} / {}: {}; baseline should be refreshed.",
+            delta.suite,
+            delta.case,
+            delta.metric,
+            delta
+                .semantic_change
+                .as_deref()
+                .unwrap_or("semantic change")
+        ));
+    }
+}
+
+fn push_probable_rename_notes(notes: &mut Vec<String>, comparison: &ComparisonOutcome) {
+    for rename in comparison.probable_renames.iter().take(8) {
+        notes.push(format!(
+            "Probable renamed row: {} -> {} ({}: {} -> {}).",
+            rename.baseline_id,
+            rename.current_id,
+            rename.changed_key,
+            rename.baseline_value,
+            rename.current_value
+        ));
+    }
+}
+
 fn is_authoritative_status(status: Option<&str>, config: &BenchSummaryConfig) -> bool {
     status.is_some_and(|value| config.authoritative_statuses.contains(value))
 }
 
 fn is_authoritative_stability(stability: Option<&str>, config: &BenchSummaryConfig) -> bool {
     stability.is_some_and(|value| config.authoritative_stabilities.contains(value))
+}
+
+fn default_profile_accepted(records: &[BenchmarkRecord], config: &BenchSummaryConfig) -> bool {
+    records.iter().all(|record| {
+        record
+            .metadata
+            .get("run_profile")
+            .is_some_and(|value| value == "default")
+            && is_authoritative_status(record.status.as_deref(), config)
+            && is_authoritative_stability(record.stability.as_deref(), config)
+    })
 }
 
 fn record_label(record: &BenchmarkRecord) -> String {
@@ -272,5 +336,54 @@ mod tests {
 
         // Assert
         assert!(!authoritative);
+    }
+
+    #[test]
+    fn should_label_default_profile_accepted_rows_without_lab_authority() {
+        // Arrange
+        let config = BenchSummaryConfig::for_tests();
+        let mut current = record("acceptable", "stable");
+        current
+            .metadata
+            .insert("run_profile".to_string(), "default".to_string());
+        let summary = ComparisonSummary {
+            authoritative: true,
+            ..ComparisonSummary::default()
+        };
+
+        // Act
+        let label = authority_label(&[current], &summary, &config);
+
+        // Assert
+        assert_eq!(label, "accepted default profile, not lab-authoritative");
+    }
+
+    #[test]
+    fn should_label_authoritative_non_default_rows_as_lab_authoritative() {
+        // Arrange
+        let config = BenchSummaryConfig::for_tests();
+        let summary = ComparisonSummary {
+            authoritative: true,
+            ..ComparisonSummary::default()
+        };
+
+        // Act
+        let label = authority_label(&[record("authoritative", "stable")], &summary, &config);
+
+        // Assert
+        assert_eq!(label, "lab-authoritative");
+    }
+
+    #[test]
+    fn should_label_noisy_rows_as_not_trustworthy_for_authority() {
+        // Arrange
+        let config = BenchSummaryConfig::for_tests();
+        let summary = ComparisonSummary::default();
+
+        // Act
+        let label = authority_label(&[record("authoritative", "noisy")], &summary, &config);
+
+        // Assert
+        assert_eq!(label, "not trustworthy enough for authority");
     }
 }

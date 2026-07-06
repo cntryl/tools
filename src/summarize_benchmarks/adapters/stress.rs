@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -29,14 +29,20 @@ impl BenchmarkAdapter for StressAdapter {
             return Ok(Vec::new());
         }
 
-        let mut records = Vec::new();
+        let mut artifacts = Vec::new();
         for path in latest_json_files(&adapter_config.input_root) {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
             let run_file = parse_stress_run_file(&text, &path)?;
+            artifacts.push(StressRunArtifact { path, run_file });
+        }
+        validate_stress_artifacts(&artifacts)?;
+
+        let mut records = Vec::new();
+        for artifact in artifacts {
             records.extend(records_from_stress_run(
-                &run_file,
-                &path,
+                &artifact.run_file,
+                &artifact.path,
                 config,
                 adapter_config,
             )?);
@@ -66,12 +72,88 @@ fn parse_stress_run_file(text: &str, path: &Path) -> Result<StressRunFile> {
 }
 
 fn latest_json_files(root: &Path) -> impl Iterator<Item = std::path::PathBuf> + '_ {
-    WalkDir::new(root)
+    let mut files = WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
         .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("latest.json"))
+        .collect::<Vec<_>>();
+    files.sort();
+    files.into_iter()
+}
+
+#[derive(Debug)]
+struct StressRunArtifact {
+    path: std::path::PathBuf,
+    run_file: StressRunFile,
+}
+
+fn validate_stress_artifacts(artifacts: &[StressRunArtifact]) -> Result<()> {
+    if artifacts.len() <= 1 {
+        return Ok(());
+    }
+
+    let run_ids = artifacts
+        .iter()
+        .filter_map(|artifact| artifact.run_file.run_id().map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    let run_id_count = artifacts
+        .iter()
+        .filter(|artifact| artifact.run_file.run_id().is_some())
+        .count();
+    if run_id_count != 0 && run_id_count != artifacts.len() {
+        bail!(
+            "mixed stress artifacts: run_id is present in {run_id_count}/{} latest.json files",
+            artifacts.len()
+        );
+    }
+    if run_ids.len() > 1 {
+        bail!(
+            "mixed stress artifacts: conflicting run_id values {}",
+            run_ids.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if run_id_count == artifacts.len() {
+        return Ok(());
+    }
+
+    validate_started_at_spread(artifacts)
+}
+
+fn validate_started_at_spread(artifacts: &[StressRunArtifact]) -> Result<()> {
+    let timestamps = artifacts
+        .iter()
+        .map(|artifact| {
+            parse_started_at_millis(&artifact.run_file.started_at).with_context(|| {
+                format!(
+                    "failed to parse started_at '{}' in {}",
+                    artifact.run_file.started_at,
+                    artifact.path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let Some(min) = timestamps.iter().min() else {
+        return Ok(());
+    };
+    let Some(max) = timestamps.iter().max() else {
+        return Ok(());
+    };
+    let spread = max.saturating_sub(*min);
+    if spread > 2 * 60 * 60 * 1_000 {
+        bail!("mixed stress artifacts: latest.json started_at spread is {spread} ms, exceeding 2 hours");
+    }
+    Ok(())
+}
+
+fn parse_started_at_millis(value: &str) -> Result<i64> {
+    if let Ok(timestamp) = value.parse::<i64>() {
+        return Ok(timestamp);
+    }
+    let timestamp = chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("started_at is neither milliseconds nor RFC3339: {value}"))?;
+    Ok(timestamp.timestamp_millis())
 }
 
 fn records_from_stress_run(
@@ -182,7 +264,10 @@ fn record_from_stats(
         .get("scenario")
         .or_else(|| summary.metadata.get("scenario"))
         .cloned();
-    let tags = summary.parameters.clone();
+    let mut tags = summary.parameters.clone();
+    if let Some(row_class) = summary.metadata.get("row_class") {
+        tags.insert("row_class".to_string(), row_class.clone());
+    }
     let mut metadata = summary_metadata(
         context.run_file,
         summary,
@@ -203,6 +288,7 @@ fn record_from_stats(
     for (key, value) in &summary.metadata {
         metadata.insert(format!("stress_metadata_{key}"), value.clone());
     }
+    copy_direct_metadata(&mut metadata, summary, ["ns_per_op_basis", "row_class"]);
 
     Some(BenchmarkRecord {
         id: record_id(summary, metric.name, scenario.as_deref()),
@@ -295,6 +381,9 @@ fn summary_metadata(
         ("p95".to_string(), stats.p95.to_string()),
         ("p99".to_string(), stats.p99.to_string()),
     ]);
+    if let Some(run_id) = run_file.run_id() {
+        metadata.insert("run_id".to_string(), run_id.to_string());
+    }
     if !summary.diagnostics.is_empty() {
         metadata.insert(
             "diagnostics".to_string(),
@@ -331,6 +420,18 @@ fn summary_metadata(
     }
     metadata.extend(summary.correctness.counters.to_metadata());
     metadata
+}
+
+fn copy_direct_metadata<const N: usize>(
+    metadata: &mut BTreeMap<String, String>,
+    summary: &StressSummary,
+    keys: [&str; N],
+) {
+    for key in keys {
+        if let Some(value) = summary.metadata.get(key) {
+            metadata.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 fn record_id(summary: &StressSummary, metric: &str, scenario: Option<&str>) -> String {
@@ -457,9 +558,22 @@ struct StressRunFile {
     suite: String,
     run_profile: String,
     #[serde(default)]
+    started_at: String,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+    #[serde(default)]
     summaries: Vec<StressSummary>,
     #[serde(default)]
     samples: Vec<StressSample>,
+}
+
+impl StressRunFile {
+    fn run_id(&self) -> Option<&str> {
+        self.metadata
+            .get("run_id")
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,6 +719,24 @@ mod tests {
         serde_json::from_str(json).expect("valid stress run")
     }
 
+    fn artifact(path: &str, started_at: &str, run_id: Option<&str>) -> StressRunArtifact {
+        let metadata = run_id.map_or_else(BTreeMap::new, |run_id| {
+            BTreeMap::from([("run_id".to_string(), run_id.to_string())])
+        });
+        StressRunArtifact {
+            path: PathBuf::from(path),
+            run_file: StressRunFile {
+                schema_version: STRESS_SCHEMA_VERSION.to_string(),
+                suite: "suite".to_string(),
+                run_profile: "default".to_string(),
+                started_at: started_at.to_string(),
+                metadata,
+                summaries: Vec::new(),
+                samples: Vec::new(),
+            },
+        }
+    }
+
     #[test]
     fn should_reject_stress_artifact_without_v2_schema() {
         let result = parse_stress_run_file(
@@ -623,6 +755,65 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_accept_single_stress_artifact_without_run_id() {
+        let artifacts = vec![artifact("target/stress/a/latest.json", "1000", None)];
+
+        assert!(validate_stress_artifacts(&artifacts).is_ok());
+    }
+
+    #[test]
+    fn should_reject_partial_stress_run_id_presence() {
+        let artifacts = vec![
+            artifact("target/stress/a/latest.json", "1000", Some("run-a")),
+            artifact("target/stress/b/latest.json", "1001", None),
+        ];
+
+        let result = validate_stress_artifacts(&artifacts);
+
+        assert!(result
+            .err()
+            .is_some_and(|error| error.to_string().contains("run_id is present")));
+    }
+
+    #[test]
+    fn should_reject_conflicting_stress_run_ids() {
+        let artifacts = vec![
+            artifact("target/stress/a/latest.json", "1000", Some("run-a")),
+            artifact("target/stress/b/latest.json", "1001", Some("run-b")),
+        ];
+
+        let result = validate_stress_artifacts(&artifacts);
+
+        assert!(result
+            .err()
+            .is_some_and(|error| error.to_string().contains("conflicting run_id")));
+    }
+
+    #[test]
+    fn should_reject_old_mixed_stress_artifacts_by_timestamp_spread() {
+        let artifacts = vec![
+            artifact("target/stress/a/latest.json", "1000", None),
+            artifact("target/stress/b/latest.json", "7201001", None),
+        ];
+
+        let result = validate_stress_artifacts(&artifacts);
+
+        assert!(result
+            .err()
+            .is_some_and(|error| error.to_string().contains("exceeding 2 hours")));
+    }
+
+    #[test]
+    fn should_accept_old_stress_artifacts_inside_timestamp_spread() {
+        let artifacts = vec![
+            artifact("target/stress/a/latest.json", "1000", None),
+            artifact("target/stress/b/latest.json", "3601000", None),
+        ];
+
+        assert!(validate_stress_artifacts(&artifacts).is_ok());
     }
 
     #[test]
@@ -727,6 +918,8 @@ mod tests {
                 "schema_version": "cntryl-stress.v2",
                 "suite": "tier1_hot_path",
                 "run_profile": "release",
+                "started_at": "1000",
+                "metadata": {"run_id": "run-123"},
                 "samples": [
                     {"benchmark_id": "tier1_hot_path/parser::header", "phase": "measured", "elapsed_ns": 10000000}
                 ],
@@ -819,7 +1012,11 @@ mod tests {
                         },
                         "errors": []
                     },
-                    "parameters": {"operation": "parse_header"}
+                    "parameters": {"operation": "parse_header"},
+                    "metadata": {
+                        "ns_per_op_basis": "logical_completed_operation",
+                        "row_class": "parsing"
+                    }
                 }]
             }"#,
         );
@@ -849,6 +1046,18 @@ mod tests {
             records[0].metadata.get("diagnostic_suggestions"),
             Some(&"Validate the microbenchmark independently.".to_string())
         );
+        assert_eq!(
+            records[0].metadata.get("run_id"),
+            Some(&"run-123".to_string())
+        );
+        assert_eq!(
+            records[0].metadata.get("ns_per_op_basis"),
+            Some(&"logical_completed_operation".to_string())
+        );
+        assert_eq!(
+            records[0].tags.get("row_class"),
+            Some(&"parsing".to_string())
+        );
         assert_eq!(records[1].metric, "allocs_per_op");
         assert_eq!(records[1].unit, "allocs/op");
         assert_eq!(records[2].metric, "bytes_per_op");
@@ -860,7 +1069,7 @@ mod tests {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "unsupported",
+                "schema_version": "cntryl-stress.v2",
                 "suite": "tier3_rpc",
                 "run_profile": "release",
                 "samples": [],
@@ -923,7 +1132,7 @@ mod tests {
         let config = config();
         let run = parse_run(
             r#"{
-                "schema_version": "cntryl-stress.v2",
+                "schema_version": "unsupported",
                 "suite": "old",
                 "run_profile": "smoke",
                 "summaries": [],

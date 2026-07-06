@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use csv::Writer;
 
+use super::classify::authority_label;
 use super::compare::ComparisonOutcome;
 use super::config::BenchSummaryConfig;
 use super::model::{
@@ -123,7 +124,7 @@ pub fn write_markdown_report(
     }
     content.push('\n');
 
-    write_summary_section(&mut content, manifest);
+    write_summary_section(&mut content, config, manifest);
     write_current_results_section(&mut content, config, &manifest.records);
     write_delta_section(&mut content, manifest, comparison);
     write_sweep_section(&mut content, sweeps);
@@ -134,8 +135,18 @@ pub fn write_markdown_report(
     Ok(())
 }
 
-fn write_summary_section(content: &mut String, manifest: &BenchmarkManifest) {
+fn write_summary_section(
+    content: &mut String,
+    config: &BenchSummaryConfig,
+    manifest: &BenchmarkManifest,
+) {
     content.push_str("## Comparison Summary\n\n");
+    let _ = writeln!(
+        content,
+        "- authority: {}",
+        authority_label(&manifest.records, &manifest.comparison_summary, config)
+    );
+    let _ = writeln!(content);
     write_table(
         content,
         &[
@@ -252,6 +263,7 @@ fn write_delta_section(
     write_delta_groups(content, &lookup, grouped);
     write_record_change_section(content, "New Records", &comparison.new_records);
     write_record_change_section(content, "Missing Records", &comparison.missing_records);
+    write_probable_rename_section(content, comparison);
 }
 
 type RecordLookup<'a> = BTreeMap<&'a str, &'a BenchmarkRecord>;
@@ -297,6 +309,7 @@ fn write_delta_groups(content: &mut String, lookup: &RecordLookup<'_>, grouped: 
                 "current_stability",
                 "baseline_status",
                 "current_status",
+                "note",
             ],
             deltas
                 .iter()
@@ -340,6 +353,10 @@ fn delta_row(delta: &BenchmarkDelta, record: Option<&BenchmarkRecord>) -> Vec<St
             .current_status
             .clone()
             .unwrap_or_else(|| "NA".to_string()),
+        delta
+            .semantic_change
+            .clone()
+            .unwrap_or_else(|| "NA".to_string()),
     ]
 }
 
@@ -368,6 +385,37 @@ fn record_change_row(record: &BenchmarkRecord) -> Vec<String> {
         format_measurement(record.value, &record.unit),
         record.status.clone().unwrap_or_else(|| "NA".to_string()),
     ]
+}
+
+fn write_probable_rename_section(content: &mut String, comparison: &ComparisonOutcome) {
+    if comparison.probable_renames.is_empty() {
+        return;
+    }
+    let _ = writeln!(content, "### Probable Renamed Rows");
+    let _ = writeln!(content);
+    write_table(
+        content,
+        &[
+            "baseline_id",
+            "current_id",
+            "changed_key",
+            "baseline_value",
+            "current_value",
+        ],
+        comparison
+            .probable_renames
+            .iter()
+            .map(|rename| {
+                vec![
+                    rename.baseline_id.clone(),
+                    rename.current_id.clone(),
+                    rename.changed_key.clone(),
+                    rename.baseline_value.clone(),
+                    rename.current_value.clone(),
+                ]
+            })
+            .collect(),
+    );
 }
 
 fn write_sweep_section(content: &mut String, sweeps: &[SweepGroup]) {

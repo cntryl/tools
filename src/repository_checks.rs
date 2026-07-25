@@ -59,6 +59,8 @@ struct DocsConfig {
     #[serde(default)]
     required: Vec<String>,
     #[serde(default)]
+    exclude_paths: Vec<String>,
+    #[serde(default)]
     forbidden_paths: Vec<String>,
     #[serde(default)]
     forbidden_text: Vec<String>,
@@ -70,7 +72,15 @@ pub fn validate_docs(args: ValidateDocsArgs) -> Result<i32> {
     let markdown: Vec<PathBuf> = WalkDir::new(&root)
         .into_iter()
         .filter_entry(|entry| {
-            entry.file_name() != "target" && !entry.file_name().to_string_lossy().starts_with('.')
+            let name = entry.file_name().to_string_lossy();
+            if entry.depth() > 0
+                && (name == "target"
+                    || name.starts_with('.')
+                    || is_excluded(&root, entry.path(), &config.exclude_paths))
+            {
+                return false;
+            }
+            true
         })
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -131,6 +141,14 @@ pub fn validate_docs(args: ValidateDocsArgs) -> Result<i32> {
         eprintln!("error: {error}");
     }
     Ok(1)
+}
+
+fn is_excluded(root: &Path, path: &Path, excluded: &[String]) -> bool {
+    let name = relative(root, path);
+    excluded.iter().any(|prefix| {
+        let prefix = prefix.trim_end_matches('/');
+        name == prefix || name.starts_with(&format!("{prefix}/"))
+    })
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -403,6 +421,27 @@ fn production_lines(text: &str) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_excluded;
+    use std::path::Path;
+
+    #[test]
+    fn should_exclude_configured_directory_and_children() {
+        let root = Path::new("/repo");
+        assert!(is_excluded(
+            root,
+            Path::new("/repo/ui/node_modules/pkg/readme.md"),
+            &["ui/node_modules".into()]
+        ));
+        assert!(!is_excluded(
+            root,
+            Path::new("/repo/ui/docs/readme.md"),
+            &["ui/node_modules".into()]
+        ));
+    }
 }
 
 #[derive(Debug, Args, Clone)]

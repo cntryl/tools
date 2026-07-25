@@ -76,6 +76,7 @@ out of the shared binary:
 ```toml
 [docs]
 required = ["README.md", "docs/README.md"]
+exclude_paths = ["ui/node_modules"]
 forbidden_paths = ["docs/archive/old.md"]
 forbidden_text = ["placeholder text"]
 
@@ -90,6 +91,9 @@ max_lines = 1600
 allowlist = ["src/large_provider.rs"]
 legacy_allowlist = []
 ```
+
+Use `docs.exclude_paths` for generated or vendored trees that are not
+repository-owned Markdown.
 
 `summarize-benchmarks` also accepts `--product-name` and `--report-title` if you want to override the default report branding.
 

@@ -7,6 +7,10 @@ Standalone Rust command-line tool with child commands for cntryl.
 - `validate-tests`: checks Rust tests for naming and AAA conventions.
 - `generate-inventory`: scans tests and benchmarks and writes an inventory report.
 - `summarize-benchmarks`: collects benchmark results, compares them to baseline, and writes a report.
+- `validate-docs`: validates configured Markdown inventory, links, anchors, and policy text.
+- `validate-benchmarks`: validates Cargo benchmark targets against documentation and workflow coverage.
+- `check-module-sizes`: checks production Rust module sizes with configured thresholds and allowlists.
+- `test-watchdog`: runs integration tests one at a time with per-test timeouts.
 
 ## Install
 
@@ -36,6 +40,10 @@ Run them from the repository you want to inspect after install:
 cntryl-tools validate-tests
 cntryl-tools generate-inventory
 cntryl-tools summarize-benchmarks
+cntryl-tools validate-docs
+cntryl-tools validate-benchmarks
+cntryl-tools check-module-sizes
+cntryl-tools test-watchdog --suite <suite> --timeout 60
 ```
 
 `validate-tests` runs against the current directory by default, so run it from the repo you want to check.
@@ -54,6 +62,33 @@ If you are already in the repo you want to inspect, just run the installed comma
 cntryl-tools validate-tests
 cntryl-tools generate-inventory
 cntryl-tools summarize-benchmarks
+cntryl-tools validate-docs
+cntryl-tools validate-benchmarks
+cntryl-tools check-module-sizes
+cntryl-tools test-watchdog --suite <suite> --timeout 60
+```
+
+## Repository policy
+
+Checks use `.cntryl/repository.toml` when present. The file keeps project policy
+out of the shared binary:
+
+```toml
+[docs]
+required = ["README.md", "docs/README.md"]
+forbidden_paths = ["docs/archive/old.md"]
+forbidden_text = ["placeholder text"]
+
+[benchmarks]
+documentation = ["docs/development/benchmarks.md"]
+workflow = ".github/workflows/bench.yml"
+not_pr_gate_phrase = "not a pull-request performance gate"
+
+[module_sizes]
+warn_lines = 1200
+max_lines = 1600
+allowlist = ["src/large_provider.rs"]
+legacy_allowlist = []
 ```
 
 `summarize-benchmarks` also accepts `--product-name` and `--report-title` if you want to override the default report branding.

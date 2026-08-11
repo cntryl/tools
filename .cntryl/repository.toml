@@ -1,0 +1,7 @@
+[tests]
+assertion_functions = [
+  "assert_close",
+  "assert_exit_code",
+  "assert_optional_close",
+  "assert_sha256_fingerprint",
+]

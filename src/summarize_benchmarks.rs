@@ -273,7 +273,8 @@ mod tests {
 
     #[test]
     fn should_exit_nonzero_for_critical_new_or_missing_records() {
-        for summary in [
+        // Arrange
+        let failing_summaries = [
             ComparisonSummary {
                 critical: 1,
                 ..ComparisonSummary::default()
@@ -286,10 +287,14 @@ mod tests {
                 missing: 1,
                 ..ComparisonSummary::default()
             },
-        ] {
-            assert_eq!(summary_exit_code(&summary), 1);
-        }
+        ];
 
-        assert_eq!(summary_exit_code(&ComparisonSummary::default()), 0);
+        // Act
+        let failing_exit_codes = failing_summaries.map(|summary| summary_exit_code(&summary));
+        let clean_exit_code = summary_exit_code(&ComparisonSummary::default());
+
+        // Assert
+        assert_eq!(failing_exit_codes, [1, 1, 1]);
+        assert_eq!(clean_exit_code, 0);
     }
 }

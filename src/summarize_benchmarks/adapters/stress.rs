@@ -739,22 +739,35 @@ mod tests {
 
     #[test]
     fn should_reject_stress_artifact_without_v2_schema() {
-        let result = parse_stress_run_file(
-            r#"{"suite": "old", "results": []}"#,
-            &PathBuf::from("target/stress/old/latest.json"),
-        );
+        // Arrange
+        let path = PathBuf::from("target/stress/old/latest.json");
 
-        assert!(result.is_err());
+        // Act
+        let result = parse_stress_run_file(r#"{"suite": "old", "results": []}"#, &path);
+
+        // Assert
+        assert!(result.err().is_some_and(|error| {
+            let message = error.to_string();
+            message.contains("unsupported stress schema")
+                && message.contains("schema_version=missing")
+                && message.contains("expected cntryl-stress.v2")
+        }));
     }
 
     #[test]
     fn should_fail_malformed_v2_stress_artifact() {
-        let result = parse_stress_run_file(
-            r#"{"schema_version": "cntryl-stress.v2"}"#,
-            &PathBuf::from("target/stress/bad/latest.json"),
-        );
+        // Arrange
+        let path = PathBuf::from("target/stress/bad/latest.json");
 
-        assert!(result.is_err());
+        // Act
+        let result = parse_stress_run_file(r#"{"schema_version": "cntryl-stress.v2"}"#, &path);
+
+        // Assert
+        assert!(result.err().is_some_and(|error| {
+            let message = format!("{:#}", error);
+            message.contains("failed to parse target/stress/bad/latest.json")
+                && message.contains("missing field `suite`")
+        }));
     }
 
     #[test]
@@ -766,13 +779,16 @@ mod tests {
 
     #[test]
     fn should_reject_partial_stress_run_id_presence() {
+        // Arrange
         let artifacts = vec![
             artifact("target/stress/a/latest.json", "1000", Some("run-a")),
             artifact("target/stress/b/latest.json", "1001", None),
         ];
 
+        // Act
         let result = validate_stress_artifacts(&artifacts);
 
+        // Assert
         assert!(result
             .err()
             .is_some_and(|error| error.to_string().contains("run_id is present")));
@@ -780,13 +796,16 @@ mod tests {
 
     #[test]
     fn should_reject_conflicting_stress_run_ids() {
+        // Arrange
         let artifacts = vec![
             artifact("target/stress/a/latest.json", "1000", Some("run-a")),
             artifact("target/stress/b/latest.json", "1001", Some("run-b")),
         ];
 
+        // Act
         let result = validate_stress_artifacts(&artifacts);
 
+        // Assert
         assert!(result
             .err()
             .is_some_and(|error| error.to_string().contains("conflicting run_id")));
@@ -794,13 +813,16 @@ mod tests {
 
     #[test]
     fn should_reject_old_mixed_stress_artifacts_by_timestamp_spread() {
+        // Arrange
         let artifacts = vec![
             artifact("target/stress/a/latest.json", "1000", None),
             artifact("target/stress/b/latest.json", "7201001", None),
         ];
 
+        // Act
         let result = validate_stress_artifacts(&artifacts);
 
+        // Assert
         assert!(result
             .err()
             .is_some_and(|error| error.to_string().contains("exceeding 2 hours")));
@@ -808,16 +830,22 @@ mod tests {
 
     #[test]
     fn should_accept_old_stress_artifacts_inside_timestamp_spread() {
+        // Arrange
         let artifacts = vec![
             artifact("target/stress/a/latest.json", "1000", None),
             artifact("target/stress/b/latest.json", "3601000", None),
         ];
 
-        assert!(validate_stress_artifacts(&artifacts).is_ok());
+        // Act
+        let result = validate_stress_artifacts(&artifacts);
+
+        // Assert
+        assert!(result.is_ok());
     }
 
     #[test]
     fn should_collect_v2_throughput_summary() {
+        // Arrange
         let config = config();
         let run = parse_run(
             r#"{
@@ -875,6 +903,7 @@ mod tests {
             }"#,
         );
 
+        // Act
         let records = records_from_stress_run(
             &run,
             &PathBuf::from("target/stress/tier4_queue/latest.json"),
@@ -883,6 +912,7 @@ mod tests {
         )
         .expect("records");
 
+        // Assert
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.id, "tier4_queue/queue::fanout|throughput_ops_per_s|scenario=fanout|client_count=16|transport=tcp");
@@ -912,6 +942,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn should_collect_v2_micro_and_allocation_records() {
+        // Arrange
         let config = config();
         let run = parse_run(
             r#"{
@@ -1021,6 +1052,7 @@ mod tests {
             }"#,
         );
 
+        // Act
         let records = records_from_stress_run(
             &run,
             &PathBuf::from("target/stress/tier1_hot_path/latest.json"),
@@ -1029,6 +1061,7 @@ mod tests {
         )
         .expect("records");
 
+        // Assert
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].metric, "ns_per_op");
         assert_eq!(records[0].unit, "ns");
@@ -1066,6 +1099,7 @@ mod tests {
 
     #[test]
     fn should_map_latency_p95_as_lower_is_better() {
+        // Arrange
         let config = config();
         let run = parse_run(
             r#"{
@@ -1111,6 +1145,7 @@ mod tests {
             }"#,
         );
 
+        // Act
         let records = records_from_stress_run(
             &run,
             &PathBuf::from("target/stress/tier3_rpc/latest.json"),
@@ -1119,6 +1154,7 @@ mod tests {
         )
         .expect("records");
 
+        // Assert
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].metric, "latency_p95_ns");
         assert_eq!(records[0].unit, "ns");
@@ -1129,6 +1165,7 @@ mod tests {
 
     #[test]
     fn should_reject_non_current_stress_schema() {
+        // Arrange
         let config = config();
         let run = parse_run(
             r#"{
@@ -1140,6 +1177,7 @@ mod tests {
             }"#,
         );
 
+        // Act
         let result = records_from_stress_run(
             &run,
             &PathBuf::from("target/stress/old/latest.json"),
@@ -1147,7 +1185,12 @@ mod tests {
             adapter_config(&config),
         );
 
-        assert!(result.is_err());
+        // Assert
+        assert!(result.err().is_some_and(|error| {
+            let message = error.to_string();
+            message.contains("unsupported stress schema 'unsupported'")
+                && message.contains("expected cntryl-stress.v2")
+        }));
     }
 
     fn assert_close(actual: f64, expected: f64) {

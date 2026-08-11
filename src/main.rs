@@ -48,18 +48,28 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     let exit_code = match cli.command {
-        Commands::ValidateTests(args) => validate_tests::run(args),
-        Commands::GenerateInventory(args) => generate_inventory::run(&args),
-        Commands::SummarizeBenchmarks(args) => summarize_benchmarks::run(args),
-        Commands::ValidateDocs(args) => repository_checks::validate_docs(args),
-        Commands::ValidateBenchmarks(args) => repository_checks::validate_benchmarks(args),
-        Commands::CheckModuleSizes(args) => repository_checks::check_module_sizes(args),
-        Commands::TestWatchdog(args) => repository_checks::test_watchdog(args),
-    }
-    .unwrap_or_else(|error| {
-        eprintln!("error: {error:#}");
-        1
-    });
+        Commands::ValidateTests(args) => validate_tests::run(args).unwrap_or_else(|error| {
+            eprintln!("error: {error:#}");
+            2
+        }),
+        Commands::GenerateInventory(args) => command_exit_code(generate_inventory::run(&args)),
+        Commands::SummarizeBenchmarks(args) => command_exit_code(summarize_benchmarks::run(args)),
+        Commands::ValidateDocs(args) => command_exit_code(repository_checks::validate_docs(args)),
+        Commands::ValidateBenchmarks(args) => {
+            command_exit_code(repository_checks::validate_benchmarks(args))
+        }
+        Commands::CheckModuleSizes(args) => {
+            command_exit_code(repository_checks::check_module_sizes(args))
+        }
+        Commands::TestWatchdog(args) => command_exit_code(repository_checks::test_watchdog(args)),
+    };
 
     std::process::exit(exit_code);
+}
+
+fn command_exit_code(result: anyhow::Result<i32>) -> i32 {
+    result.unwrap_or_else(|error| {
+        eprintln!("error: {error:#}");
+        1
+    })
 }

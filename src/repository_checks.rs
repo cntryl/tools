@@ -430,17 +430,22 @@ mod tests {
 
     #[test]
     fn should_exclude_configured_directory_and_children() {
+        // Arrange
         let root = Path::new("/repo");
-        assert!(is_excluded(
+        let excluded_paths = ["ui/node_modules".into()];
+
+        // Act
+        let directory_is_excluded = is_excluded(
             root,
             Path::new("/repo/ui/node_modules/pkg/readme.md"),
-            &["ui/node_modules".into()]
-        ));
-        assert!(!is_excluded(
-            root,
-            Path::new("/repo/ui/docs/readme.md"),
-            &["ui/node_modules".into()]
-        ));
+            &excluded_paths,
+        );
+        let unrelated_path_is_excluded =
+            is_excluded(root, Path::new("/repo/ui/docs/readme.md"), &excluded_paths);
+
+        // Assert
+        assert!(directory_is_excluded);
+        assert!(!unrelated_path_is_excluded);
     }
 }
 

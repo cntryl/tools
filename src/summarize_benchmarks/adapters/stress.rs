@@ -151,6 +151,14 @@ fn parse_started_at_millis(value: &str) -> Result<i64> {
     if let Ok(timestamp) = value.parse::<i64>() {
         return Ok(timestamp);
     }
+    if let Some(epoch_ns) = value
+        .split('-')
+        .next()
+        .and_then(|prefix| prefix.parse::<u128>().ok())
+    {
+        return i64::try_from(epoch_ns / 1_000_000)
+            .context("sortable stress timestamp milliseconds exceed i64");
+    }
     let timestamp = chrono::DateTime::parse_from_rfc3339(value)
         .with_context(|| format!("started_at is neither milliseconds nor RFC3339: {value}"))?;
     Ok(timestamp.timestamp_millis())

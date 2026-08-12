@@ -208,23 +208,6 @@ fn records_from_summary(
         }
     }
 
-    for (metric_name, stats) in [
-        ("ns_per_op", summary.ns_per_op.as_ref()),
-        ("allocs_per_op", summary.allocs_per_op.as_ref()),
-        ("bytes_per_op", summary.bytes_per_op.as_ref()),
-    ] {
-        if summary.primary_metric == metric_name {
-            continue;
-        }
-        let Some(stats) = stats else {
-            continue;
-        };
-        let metric = metric_spec(metric_name)?;
-        if let Some(record) = record_from_stats(&context, summary, metric, stats) {
-            records.push(record);
-        }
-    }
-
     Ok(records)
 }
 
@@ -586,10 +569,7 @@ struct StressSummary {
     warmup_samples: usize,
     cooldown_samples: usize,
     stats: Option<StressStats>,
-    ns_per_op: Option<StressStats>,
     overhead_ns_per_op: Option<StressStats>,
-    allocs_per_op: Option<StressStats>,
-    bytes_per_op: Option<StressStats>,
     quality: String,
     correctness: StressCorrectness,
     #[serde(default)]
@@ -911,7 +891,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn should_collect_v2_micro_and_allocation_records() {
+    fn should_collect_only_canonical_v2_micro_record() {
         let config = config();
         let run = parse_run(
             r#"{
@@ -1029,7 +1009,7 @@ mod tests {
         )
         .expect("records");
 
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 1);
         assert_eq!(records[0].metric, "ns_per_op");
         assert_eq!(records[0].unit, "ns");
         assert_eq!(records[0].metric_direction, MetricDirection::LowerIsBetter);
@@ -1058,10 +1038,6 @@ mod tests {
             records[0].tags.get("row_class"),
             Some(&"parsing".to_string())
         );
-        assert_eq!(records[1].metric, "allocs_per_op");
-        assert_eq!(records[1].unit, "allocs/op");
-        assert_eq!(records[2].metric, "bytes_per_op");
-        assert_eq!(records[2].unit, "B/op");
     }
 
     #[test]

@@ -1,9 +1,7 @@
 name: Publish to crates.io
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,6 +30,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          test "${GITHUB_REF_TYPE}" = "tag"
           package_version="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "cntryl-tools") | .version')"
           test "$RELEASE_TAG" = "v$package_version"
 

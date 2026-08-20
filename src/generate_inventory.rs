@@ -52,7 +52,7 @@ pub fn run(args: &GenerateInventoryArgs) -> Result<i32> {
 }
 
 fn gather_tests(root: &Path, subdir: &str) -> Result<BTreeMap<String, Vec<String>>> {
-    let pattern = Regex::new(r"(?m)^\s*fn\s+(should_[A-Za-z0-9_]+)")?;
+    let pattern = Regex::new(r"(?m)^\s*(?:async\s+)?fn\s+(should_[A-Za-z0-9_]+)")?;
     gather_named_functions(root, subdir, &pattern)
 }
 
@@ -194,5 +194,36 @@ fn append_inventory_section(
             lines.push(format!("    - `{name}`"));
         }
         lines.push(String::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gather_tests;
+
+    #[test]
+    fn should_inventory_async_test_given_a_framework_qualified_attribute() {
+        // Arrange
+        let root = std::env::temp_dir().join(format!(
+            "cntryl-tools-async-inventory-{}",
+            std::process::id()
+        ));
+        let tests = root.join("tests");
+        std::fs::create_dir_all(&tests).expect("create fixture directory");
+        std::fs::write(
+            tests.join("async_test.rs"),
+            "#[tokio::test]\nasync fn should_inventory_async_behavior() {}\n",
+        )
+        .expect("write fixture");
+
+        // Act
+        let inventory = gather_tests(&root, "tests").expect("generate inventory");
+        std::fs::remove_dir_all(&root).expect("remove fixture directory");
+
+        // Assert
+        assert_eq!(
+            inventory.get("tests/async_test.rs"),
+            Some(&vec!["should_inventory_async_behavior".to_string()])
+        );
     }
 }

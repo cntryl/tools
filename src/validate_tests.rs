@@ -100,8 +100,9 @@ fn find_tests_in_file(file_path: &Path) -> Result<Vec<TestResult>> {
         .with_context(|| format!("failed to read {}", file_path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
 
-    let test_attr_re = Regex::new(r"^\s*#\[test\]\s*$")?;
-    let fn_name_re = Regex::new(r"^\s*fn\s+(\w+)")?;
+    let test_attr_re =
+        Regex::new(r"^\s*#\[(?:[A-Za-z_][A-Za-z0-9_]*::)*test(?:\s*\([^]]*\))?\]\s*$")?;
+    let fn_name_re = Regex::new(r"^\s*(?:async\s+)?fn\s+(\w+)")?;
 
     let mut results = Vec::new();
     for index in 0..lines.len() {
@@ -360,5 +361,34 @@ fn print_file_results(file: &Path, results: &[TestResult]) {
                 println!("    - {issue}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_tests_in_file;
+
+    #[test]
+    fn should_validate_async_test_given_a_framework_qualified_attribute() {
+        // Arrange
+        let path =
+            std::env::temp_dir().join(format!("cntryl-tools-async-test-{}.rs", std::process::id()));
+        std::fs::write(
+            &path,
+            "#[tokio::test]\nasync fn invalid_name() {\n    assert!(true);\n}\n",
+        )
+        .expect("write fixture");
+
+        // Act
+        let results = find_tests_in_file(&path).expect("analyze fixture");
+        std::fs::remove_file(path).expect("remove fixture");
+
+        // Assert
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].test, "invalid_name");
+        assert!(results[0]
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("NAMING:")));
     }
 }

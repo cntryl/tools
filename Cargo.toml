@@ -2,9 +2,10 @@
 name = "cntryl-tools"
 version = "0.1.0"
 edition = "2021"
-publish = false
 description = "Standalone command-line tool with child commands for cntryl"
 readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/cntryl/tools"
 
 [dependencies]
 anyhow = "1"

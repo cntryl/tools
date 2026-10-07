@@ -75,3 +75,52 @@ fn should_preserve_markdown_heading_validation_when_line_anchors_are_supported()
     assert!(valid.status.success());
     assert_eq!(missing.status.code(), Some(1));
 }
+
+fn run_reciprocal_validator(return_anchor: &str) -> Output {
+    let repository = tempfile::tempdir().expect("create fixture repository");
+    fs::write(
+        repository.path().join("first.md"),
+        "# First\n\n[Second](second.md#second)\n",
+    )
+    .expect("write first referring document");
+    fs::write(
+        repository.path().join("second.md"),
+        format!("# Second\n\n[First](first.md#{return_anchor})\n"),
+    )
+    .expect("write second referring document");
+    Command::new(env!("CARGO_BIN_EXE_cntryl-tools"))
+        .arg("validate-docs")
+        .arg("--root")
+        .arg(repository.path())
+        .output()
+        .expect("run documentation validator")
+}
+
+#[test]
+fn should_accept_reciprocal_heading_links_regardless_of_document_order() {
+    // Arrange
+    let return_anchor = "first";
+
+    // Act
+    let output = run_reciprocal_validator(return_anchor);
+
+    // Assert
+    assert!(
+        output.status.success(),
+        "valid reciprocal links failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_reject_missing_cross_document_headings_after_indexing_targets() {
+    // Arrange
+    let return_anchor = "missing";
+
+    // Act
+    let output = run_reciprocal_validator(return_anchor);
+
+    // Assert
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("first.md#missing"));
+}

@@ -100,18 +100,26 @@ pub fn validate_docs(args: ValidateDocsArgs) -> Result<i32> {
             errors.push(format!("forbidden document is present: {path}"));
         }
     }
-    let mut headings = BTreeMap::new();
-    for path in &markdown {
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+    let documents = markdown
+        .into_iter()
+        .map(|path| {
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            Ok((path, text))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let headings: BTreeMap<_, _> = documents
+        .iter()
+        .map(|(path, text)| (relative(&root, path), heading_ids(text)))
+        .collect();
+    for (path, text) in &documents {
         let name = relative(&root, path);
-        headings.insert(name.clone(), heading_ids(&text));
         for marker in &config.forbidden_text {
             if text.contains(marker) {
                 errors.push(format!("{name}: forbidden documentation text {marker:?}"));
             }
         }
-        for (target, anchor) in markdown_links(&text) {
+        for (target, anchor) in markdown_links(text) {
             if target.is_empty() || target.contains("://") || target.starts_with("mailto:") {
                 continue;
             }
@@ -140,7 +148,7 @@ pub fn validate_docs(args: ValidateDocsArgs) -> Result<i32> {
         }
     }
     if errors.is_empty() {
-        println!("validated {} Markdown documents", markdown.len());
+        println!("validated {} Markdown documents", documents.len());
         return Ok(0);
     }
     for error in errors {

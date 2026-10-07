@@ -9,6 +9,14 @@ Standalone Rust command-line tool with child commands for cntryl.
 - `summarize-benchmarks`: collects benchmark results, compares them to baseline, and writes a report.
 - `validate-docs`: validates configured Markdown inventory, links, anchors, and policy text.
 - `validate-benchmarks`: validates Cargo benchmark targets against documentation and workflow coverage.
+
+Benchmark repository configuration retains `benchmarks.workflow` as the primary
+workflow. `benchmarks.additional_workflows` adds dedicated benchmark workflows to
+the coverage union; every listed workflow must have a manual trigger and must
+not run on pull requests. `[benchmarks.manual_targets]` maps explicitly manual
+diagnostic target names to nonempty reasons. Each manual target must be registered
+in Cargo and have an exact `cargo bench --bench TARGET` command in the configured
+documentation. Unclassified targets still require workflow execution coverage.
 - `check-module-sizes`: checks production Rust module sizes with configured thresholds and allowlists.
 - `test-watchdog`: runs integration tests one at a time with per-test timeouts.
 

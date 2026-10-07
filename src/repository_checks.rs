@@ -227,6 +227,10 @@ struct BenchmarkConfig {
     #[serde(default = "default_benchmark_workflow")]
     workflow: String,
     #[serde(default)]
+    additional_workflows: Vec<String>,
+    #[serde(default)]
+    manual_targets: BTreeMap<String, String>,
+    #[serde(default)]
     not_pr_gate_phrase: Option<String>,
 }
 
@@ -235,6 +239,8 @@ impl Default for BenchmarkConfig {
         Self {
             documentation: default_benchmark_docs(),
             workflow: default_benchmark_workflow(),
+            additional_workflows: Vec::new(),
+            manual_targets: BTreeMap::new(),
             not_pr_gate_phrase: None,
         }
     }
@@ -283,7 +289,8 @@ pub fn validate_benchmarks(args: ValidateBenchmarksArgs) -> Result<i32> {
         })
         .filter_map(|target| target["name"].as_str().map(str::to_owned))
         .collect();
-    let bench_re = Regex::new(r#"cargo\s+bench\s+--bench\s+['\"`]?([A-Za-z0-9_.*-]+)"#)?;
+    let bench_re =
+        Regex::new(r#"cargo\s+bench\s+(?:--locked\s+)?--bench\s+['\"`]?([A-Za-z0-9_.*-]+)"#)?;
     let mut errors = Vec::new();
     let mut docs = String::new();
     for path in &config.documentation {
@@ -302,21 +309,47 @@ pub fn validate_benchmarks(args: ValidateBenchmarksArgs) -> Result<i32> {
         }
         docs.push_str(&text);
     }
-    let workflow = fs::read_to_string(root.join(&config.workflow))
-        .with_context(|| format!("failed to read {}", config.workflow))?;
+    let mut workflow = String::new();
+    for path in std::iter::once(&config.workflow).chain(&config.additional_workflows) {
+        let text = fs::read_to_string(root.join(path))
+            .with_context(|| format!("failed to read {path}"))?;
+        if !text.contains("workflow_dispatch:") {
+            errors.push(format!("benchmark workflow {path} has no manual trigger"));
+        }
+        if text.contains("pull_request:") {
+            errors.push(format!(
+                "benchmark workflow {path} must not be a pull-request gate"
+            ));
+        }
+        workflow.push_str(&text);
+        workflow.push('\n');
+    }
+    for (target, reason) in &config.manual_targets {
+        if !registered.contains(target) {
+            errors.push(format!("manual benchmark target {target} is unregistered"));
+        }
+        if reason.trim().is_empty() {
+            errors.push(format!("manual benchmark target {target} has no reason"));
+        }
+        if !bench_re
+            .captures_iter(&docs)
+            .any(|capture| capture[1] == *target)
+        {
+            errors.push(format!(
+                "manual benchmark target {target} has no documented command"
+            ));
+        }
+    }
     for target in registered {
+        if config.manual_targets.contains_key(&target) {
+            continue;
+        }
         if !bench_re.captures_iter(&workflow).any(|capture| {
             capture[1] == target
                 || capture[1].contains('*') && target.starts_with(capture[1].trim_end_matches('*'))
         }) {
             errors.push(format!("benchmark workflow does not execute {target}"));
         }
-    }
-    if !workflow.contains("workflow_dispatch:") {
-        errors.push("benchmark workflow has no manual trigger".into());
-    }
-    if workflow.contains("pull_request:") {
-        errors.push("benchmark workflow must not be a pull-request gate".into());
     }
     if let Some(phrase) = config.not_pr_gate_phrase {
         if !docs.contains(&phrase) {

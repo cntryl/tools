@@ -124,10 +124,16 @@ pub fn validate_docs(args: ValidateDocsArgs) -> Result<i32> {
             }
             if let Some(anchor) = anchor {
                 let target_name = relative(&root, &target_path);
-                if !headings
-                    .get(&target_name)
-                    .is_some_and(|ids| ids.contains(&slug(&anchor)))
-                {
+                let valid = if let Some((first, last)) = source_line_range(&anchor) {
+                    target_path.is_file()
+                        && fs::read_to_string(&target_path)
+                            .is_ok_and(|text| first <= last && last <= text.lines().count())
+                } else {
+                    headings
+                        .get(&target_name)
+                        .is_some_and(|ids| ids.contains(&slug(&anchor)))
+                };
+                if !valid {
                     errors.push(format!("{name}: broken anchor {target}#{anchor}"));
                 }
             }
@@ -175,6 +181,21 @@ fn heading_ids(text: &str) -> BTreeSet<String> {
         .filter(|line| line.starts_with('#') || line.starts_with(' '))
         .map(|line| slug(line.trim_matches('#').trim()))
         .collect()
+}
+
+fn source_line_range(anchor: &str) -> Option<(usize, usize)> {
+    let range = anchor.strip_prefix('L')?;
+    let (first, last) = range.split_once("-L").unwrap_or((range, range));
+    if first.is_empty()
+        || last.is_empty()
+        || !first.bytes().all(|byte| byte.is_ascii_digit())
+        || !last.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let first = first.parse::<usize>().ok()?;
+    let last = last.parse::<usize>().ok()?;
+    (first > 0 && last > 0).then_some((first, last))
 }
 
 fn markdown_links(text: &str) -> Vec<(String, Option<String>)> {

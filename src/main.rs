@@ -1,5 +1,6 @@
 #[path = "summarize_benchmarks/adapters/mod.rs"]
 mod adapters;
+mod benchmark_workflows;
 #[path = "summarize_benchmarks/classify.rs"]
 mod classify;
 #[path = "summarize_benchmarks/compare.rs"]

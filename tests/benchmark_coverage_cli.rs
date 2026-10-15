@@ -99,7 +99,14 @@ fn should_reject_manual_target_without_documented_command() {
 #[test]
 fn should_reject_pull_request_gate_in_additional_workflow() {
     // Arrange
-    let root = fixture(CONFIG, &format!("{STRESS}  pull_request:\n"), DOCS);
+    let root = fixture(
+        CONFIG,
+        &STRESS.replace(
+            "  workflow_dispatch:\n",
+            "  workflow_dispatch:\n  pull_request:\n",
+        ),
+        DOCS,
+    );
     // Act
     let output = validate(&root);
     // Assert
@@ -147,4 +154,60 @@ fn should_reject_uncovered_target_without_explicit_manual_classification() {
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("benchmark workflow does not execute pressure"));
     assert!(!output.status.success());
+}
+
+#[test]
+fn should_cover_benchmark_selected_by_matrix_axis() {
+    // Arrange
+    let workflow = "on:\n  workflow_dispatch:\njobs:\n  bench:\n    strategy:\n      matrix:\n        bench: [tier5_saturation]\n    steps:\n      - run: cargo bench --locked --features stress-soak --bench '${{ matrix.bench }}'\n";
+    let root = fixture(CONFIG, workflow, DOCS);
+    // Act
+    let output = validate(&root);
+    // Assert
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_cover_benchmark_selected_by_matrix_include() {
+    // Arrange
+    let workflow = "on:\n  workflow_dispatch:\njobs:\n  bench:\n    strategy:\n      matrix:\n        include:\n          - bench: tier5_saturation\n            workload: example\n    steps:\n      - run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.workload }}'\n";
+    let root = fixture(CONFIG, workflow, DOCS);
+    // Act
+    let output = validate(&root);
+    // Assert
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_not_count_unused_matrix_targets_in_another_job() {
+    // Arrange
+    let workflow = "on:\n  workflow_dispatch:\njobs:\n  unused:\n    strategy:\n      matrix:\n        bench: [tier5_saturation]\n    steps:\n      - run: echo unused\n  bench:\n    strategy:\n      matrix:\n        bench: [tier1_hot]\n    steps:\n      - run: cargo bench --bench '${{ matrix.bench }}'\n";
+    let root = fixture(CONFIG, workflow, DOCS);
+    // Act
+    let output = validate(&root);
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("benchmark workflow does not execute tier5_saturation"));
+}
+
+#[test]
+fn should_not_count_excluded_matrix_targets() {
+    // Arrange
+    let workflow = "on:\n  workflow_dispatch:\njobs:\n  bench:\n    strategy:\n      matrix:\n        bench: [tier5_saturation, tier1_hot]\n        exclude:\n          - bench: tier5_saturation\n    steps:\n      - run: cargo bench --bench '${{ matrix.bench }}'\n";
+    let root = fixture(CONFIG, workflow, DOCS);
+    // Act
+    let output = validate(&root);
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("benchmark workflow does not execute tier5_saturation"));
 }

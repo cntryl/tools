@@ -1,7 +1,7 @@
 //! Resolve Cargo benchmark selectors in each job's own static matrix.
 use anyhow::Result;
 use regex::Regex;
-use serde_yaml::{Mapping, Value};
+use serde_yaml_ng::{Mapping, Value};
 
 fn matches(row: &Mapping, pattern: &Mapping) -> bool {
     pattern
@@ -77,7 +77,7 @@ pub(crate) fn selectors(text: &str) -> Result<Vec<String>> {
         .captures_iter(&text)
         .map(|capture| capture[1].to_owned())
         .collect();
-    let document: Value = serde_yaml::from_str(&text)?;
+    let document: Value = serde_yaml_ng::from_str(&text)?;
     if let Some(jobs) = document.get("jobs").and_then(Value::as_mapping) {
         for job in jobs.values() {
             let rows = matrix_rows(&job["strategy"]["matrix"]);

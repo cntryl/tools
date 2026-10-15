@@ -317,7 +317,7 @@ pub fn validate_benchmarks(args: ValidateBenchmarksArgs) -> Result<i32> {
         }
         docs.push_str(&text);
     }
-    let mut workflow = String::new();
+    let mut workflow_targets = Vec::new();
     for path in std::iter::once(&config.workflow).chain(&config.additional_workflows) {
         let text = fs::read_to_string(root.join(path))
             .with_context(|| format!("failed to read {path}"))?;
@@ -329,8 +329,10 @@ pub fn validate_benchmarks(args: ValidateBenchmarksArgs) -> Result<i32> {
                 "benchmark workflow {path} must not be a pull-request gate"
             ));
         }
-        workflow.push_str(&text);
-        workflow.push('\n');
+        workflow_targets.extend(
+            crate::benchmark_workflows::selectors(&text)
+                .with_context(|| format!("invalid benchmark workflow {path}"))?,
+        );
     }
     for (target, reason) in &config.manual_targets {
         if !registered.contains(target) {
@@ -352,9 +354,9 @@ pub fn validate_benchmarks(args: ValidateBenchmarksArgs) -> Result<i32> {
         if config.manual_targets.contains_key(&target) {
             continue;
         }
-        if !bench_re.captures_iter(&workflow).any(|capture| {
-            capture[1] == target
-                || capture[1].contains('*') && target.starts_with(capture[1].trim_end_matches('*'))
+        if !workflow_targets.iter().any(|selector| {
+            selector == &target
+                || selector.contains('*') && target.starts_with(selector.trim_end_matches('*'))
         }) {
             errors.push(format!("benchmark workflow does not execute {target}"));
         }

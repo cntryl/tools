@@ -54,8 +54,6 @@ cntryl-tools check-module-sizes
 cntryl-tools test-watchdog --suite <suite> --timeout 60
 ```
 
-`validate-tests` runs against the current directory by default, so run it from the repo you want to check.
-
 If you do not want to install the tool yet, you can run it with Cargo from any repo:
 
 ```bash
@@ -75,6 +73,31 @@ cntryl-tools validate-benchmarks
 cntryl-tools check-module-sizes
 cntryl-tools test-watchdog --suite <suite> --timeout 60
 ```
+
+### `validate-tests`
+
+Run the command from the Cargo workspace root or from inside any member.
+
+```bash
+cntryl-tools validate-tests
+cd crates/my-member
+cntryl-tools validate-tests --json report.json
+```
+
+Both invocations scan every Cargo workspace member. The scan covers each
+member's `src` and `tests` trees and the entry files of integration test
+targets declared in Cargo. It walks through nested workspace members and
+skips nested packages outside the active workspace. Use `--file` to
+check a helper module outside the scanned trees.
+
+Workspace scans require Cargo on `PATH`. Discovery reads Cargo metadata
+without fetching dependencies. Without an ancestor `Cargo.toml`, the command
+scans `src` and `tests` under the current directory. Single-file checks run
+without Cargo.
+
+Relative `--file` and `--json` arguments resolve from the invocation directory.
+In a workspace scan, JSON finding paths are relative to the workspace root.
+Files outside the workspace root appear with absolute paths.
 
 ## Repository policy
 

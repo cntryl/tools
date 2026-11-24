@@ -1,11 +1,16 @@
-use std::fs;
+mod cargo_scope;
+
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 use anyhow::{Context, Result};
 use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 use walkdir::WalkDir;
+
+use self::cargo_scope::CargoScope;
 
 #[derive(Debug, Args, Clone)]
 pub struct ValidateTestsArgs {
@@ -32,7 +37,7 @@ impl TestResult {
 
 pub fn run(args: ValidateTestsArgs) -> Result<i32> {
     if let Some(file) = args.file {
-        let results = find_tests_in_file(&file)?;
+        let results = find_tests_in_file(&file, &file)?;
         print_file_results(&file, &results);
         if let Some(path) = args.json {
             write_json(&path, &results)?;
@@ -41,7 +46,15 @@ pub fn run(args: ValidateTestsArgs) -> Result<i32> {
         return Ok(exit_code(&results));
     }
 
-    let results = collect_repo_results()?;
+    let cwd = env::current_dir().context("failed to determine the current directory")?;
+    let scope = cargo_scope::discover(&cwd)?;
+    let scan_root = scope
+        .as_ref()
+        .map_or(cwd.as_path(), |scope| scope.workspace_root.as_path());
+    let results = collect_repo_results(scan_root, scope.as_ref())?;
+    if scan_root != cwd {
+        println!("Scan root: {}", scan_root.display());
+    }
     print_summary(&results);
     if let Some(path) = args.json {
         write_json(&path, &results)?;
@@ -66,36 +79,71 @@ fn write_json(path: &Path, results: &[TestResult]) -> Result<()> {
     Ok(())
 }
 
-fn collect_repo_results() -> Result<Vec<TestResult>> {
-    let mut results = Vec::new();
-    for directory in [Path::new("src"), Path::new("tests")] {
-        if !directory.exists() {
-            continue;
+fn collect_repo_results(scan_root: &Path, scope: Option<&CargoScope>) -> Result<Vec<TestResult>> {
+    let mut files = BTreeSet::new();
+    if let Some(scope) = scope {
+        files.extend(scope.test_files.iter().cloned());
+        for member in &scope.member_roots {
+            collect_package_files(member, Some(&scope.member_roots), &mut files)?;
         }
-
-        for file in find_all_rust_files(directory) {
-            results.extend(find_tests_in_file(&file)?);
-        }
+    } else {
+        collect_package_files(scan_root, None, &mut files)?;
     }
 
+    let mut results = Vec::new();
+    for file in files {
+        let report_path = file.strip_prefix(scan_root).unwrap_or(&file);
+        results.extend(find_tests_in_file(&file, report_path)?);
+    }
     Ok(results)
 }
 
-fn find_all_rust_files(dir: &Path) -> Vec<PathBuf> {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_entry(|entry| {
+fn collect_package_files(
+    package: &Path,
+    member_roots: Option<&BTreeSet<PathBuf>>,
+    files: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    for directory in [package.join("src"), package.join("tests")] {
+        if !directory
+            .try_exists()
+            .with_context(|| format!("failed to look up {}", directory.display()))?
+        {
+            continue;
+        }
+
+        let mut entries = WalkDir::new(&directory).into_iter();
+        while let Some(entry) = entries.next() {
+            let entry = entry.with_context(|| format!("failed to walk {}", directory.display()))?;
+            let is_dir = entry.file_type().is_dir();
             let name = entry.file_name().to_string_lossy();
-            entry.depth() == 0 || (!name.starts_with('.') && name != "target")
-        })
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
-        .map(walkdir::DirEntry::into_path)
-        .collect()
+
+            if entry.depth() > 0 && (name.starts_with('.') || name == "target") {
+                if is_dir {
+                    entries.skip_current_dir();
+                }
+                continue;
+            }
+
+            // A member may live at another member's tests/ directory and
+            // place integration test modules alongside its manifest.
+            if is_dir
+                && member_roots.is_some_and(|members| !members.contains(entry.path()))
+                && cargo_scope::has_manifest(entry.path())?
+            {
+                entries.skip_current_dir();
+            }
+
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "rs")
+            {
+                files.insert(entry.into_path());
+            }
+        }
+    }
+    Ok(())
 }
 
-fn find_tests_in_file(file_path: &Path) -> Result<Vec<TestResult>> {
+fn find_tests_in_file(file_path: &Path, report_path: &Path) -> Result<Vec<TestResult>> {
     let content = fs::read_to_string(file_path)
         .with_context(|| format!("failed to read {}", file_path.display()))?;
     let lines: Vec<&str> = content.lines().collect();
@@ -115,7 +163,7 @@ fn find_tests_in_file(file_path: &Path) -> Result<Vec<TestResult>> {
                 .get(1)
                 .map(|value| value.as_str())
                 .unwrap_or_default();
-            results.push(analyze_test(file_path, test_name, index + 2, &lines)?);
+            results.push(analyze_test(report_path, test_name, index + 2, &lines)?);
         }
     }
 
@@ -123,7 +171,7 @@ fn find_tests_in_file(file_path: &Path) -> Result<Vec<TestResult>> {
 }
 
 fn analyze_test(
-    file_path: &Path,
+    report_path: &Path,
     test_name: &str,
     fn_line_number: usize,
     lines: &[&str],
@@ -231,7 +279,7 @@ fn analyze_test(
     }
 
     Ok(TestResult {
-        file: file_path.display().to_string(),
+        file: report_path.display().to_string(),
         test: test_name.to_string(),
         line: fn_line_number,
         line_count: test_lines,
@@ -380,7 +428,7 @@ mod tests {
         .expect("write fixture");
 
         // Act
-        let results = find_tests_in_file(&path).expect("analyze fixture");
+        let results = find_tests_in_file(&path, &path).expect("analyze fixture");
         std::fs::remove_file(path).expect("remove fixture");
 
         // Assert
